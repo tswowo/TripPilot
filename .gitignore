@@ -1,0 +1,58 @@
+# Secrets & credentials (NEVER commit API keys or Meituan/Amap tokens!)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*token*.json
+
+# Python & uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local runtime state & tool output blobs
+.trippilot/
+logs/
+outputs/
+*.db
+*.sqlite3
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+**/._*
+__MACOSX/
+Thumbs.db
+
+# 本地临时抓包/调试产物，不入库
+.scratch/
+
+# Test, coverage & build artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.hypothesis/
+build/
+dist/
+*.egg-info/
+
+# Node & local tooling
+node_modules/
+.npm/
+.qoder/
+
+# Editor, OS & temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
