@@ -1,0 +1,68 @@
+{
+  "maps_direction_bicycling": [
+    "destination",
+    "origin"
+  ],
+  "maps_direction_driving": [
+    "destination",
+    "origin"
+  ],
+  "maps_direction_transit_integrated": [
+    "city",
+    "cityd",
+    "destination",
+    "origin"
+  ],
+  "maps_direction_walking": [
+    "destination",
+    "origin"
+  ],
+  "maps_distance": [
+    "destination",
+    "origins",
+    "type"
+  ],
+  "maps_geo": [
+    "address",
+    "city"
+  ],
+  "maps_regeocode": [
+    "location"
+  ],
+  "maps_ip_location": [
+    "ip"
+  ],
+  "maps_schema_personal_map": [
+    "lineList",
+    "orgName"
+  ],
+  "maps_around_search": [
+    "keywords",
+    "location",
+    "radius",
+    "strategy"
+  ],
+  "maps_search_detail": [
+    "id"
+  ],
+  "maps_text_search": [
+    "city",
+    "citylimit",
+    "keywords"
+  ],
+  "maps_schema_navi": [
+    "lat",
+    "lon"
+  ],
+  "maps_schema_take_taxi": [
+    "dlat",
+    "dlon",
+    "dname",
+    "slat",
+    "slon",
+    "sname"
+  ],
+  "maps_weather": [
+    "city"
+  ]
+}

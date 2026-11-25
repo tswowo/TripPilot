@@ -1,0 +1,7 @@
+{
+  "status": "error",
+  "error": {
+    "code": "E_API_ERROR",
+    "message": "Bad Request"
+  }
+}

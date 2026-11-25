@@ -1,0 +1,17 @@
+[
+  "maps_around_search",
+  "maps_direction_bicycling",
+  "maps_direction_driving",
+  "maps_direction_transit_integrated",
+  "maps_direction_walking",
+  "maps_distance",
+  "maps_geo",
+  "maps_ip_location",
+  "maps_regeocode",
+  "maps_schema_navi",
+  "maps_schema_personal_map",
+  "maps_schema_take_taxi",
+  "maps_search_detail",
+  "maps_text_search",
+  "maps_weather"
+]
