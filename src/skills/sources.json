@@ -1,0 +1,76 @@
+{
+  "_comment": "第三方接入能力清单。同步：python scripts/check_skill_updates.py",
+  "updated_at": "2026-11-25",
+  "sources": [
+    {
+      "name": "meituan-travel",
+      "kind": "Meituan Skill",
+      "channel": "developer.meituan.com AI Hub",
+      "package": "@meituan-travel/ht-ai",
+      "package_latest": "0.0.6",
+      "package_published": "2026-06-22",
+      "endpoint": "/v1/api/voyage/openapi/query",
+      "auth": "MEITUAN_HT_TOKEN(开发者 token)",
+      "local_path": "src/skills/meituan-travel",
+      "status": "adopted",
+      "note": "已按官方 CLI 形态实测跑通；禁止直连（Skill 条款）",
+      "adapter": "src/trippilot/tools/meituan_skill.py",
+      "package_resolved_from_latest": "0.0.6",
+      "invocation": "npx -y @meituan-travel/ht-ai@latest query --query --origin-query --channel meituan-developer [--city] -o json",
+      "fixtures": [
+        "meituan_flight_cli.json",
+        "meituan_train_cli.json",
+        "meituan_hotel_cli.json",
+        "meituan_error_cli.json"
+      ],
+      "measured_latency_s": [
+        15.2,
+        17.5,
+        23.8,
+        29.7
+      ],
+      "timeout_policy": "keep 120s per official doc"
+    },
+    {
+      "name": "meituan-travel-skillhub-1.0.7",
+      "kind": "Meituan Skill（第三方社区转载）",
+      "channel": "skillhub.cn (腾讯运营，非美团)",
+      "package": "@meituan-travel/ht-ai-open",
+      "package_latest": "0.0.4",
+      "package_published": "2026-08-14",
+      "endpoint": "/v1/api/voyage/auth/openapi/query",
+      "auth": "passport_token（扫码授权，client_id 硬编码）",
+      "local_path": "references/skill-archives/meituan-travel-skillhub-1.0.7",
+      "status": "archive",
+      "note": "verified=false / claim_state=unclaimed；用别人 client_id 走 passport 授权，供应链风险"
+    },
+    {
+      "name": "amap-cli-skill",
+      "kind": "Amap Skill + CLI + Electron GUI",
+      "channel": "lbs.amap.com/api/cli",
+      "package": "@amap-lbs/amap-gui",
+      "package_latest": "1.0.3",
+      "package_published": "2026-04-07",
+      "download": "https://a.amap.com/jsapi/static/openClaw/amap-cli-skill.zip",
+      "local_path": "references/skill-archives/amap-cli-skill",
+      "status": "archive",
+      "note": "依赖 electron，需桌面 GUI；无法在无头容器/服务器运行，故仅作参考样本"
+    },
+    {
+      "name": "amap-mcp",
+      "kind": "Amap MCP Server",
+      "channel": "lbs.amap.com/api/mcp-server",
+      "transport": "streamable_http（2026-03-17 起 SSE 已下线）",
+      "url": "https://mcp.amap.com/mcp?key=<AMAP_MAPS_API_KEY>",
+      "npm_alternative": {
+        "package": "@amap/amap-maps-mcp-server",
+        "latest": "0.0.8",
+        "published": "2025-04-25",
+        "requires_node": ">=22.14.0"
+      },
+      "local_path": null,
+      "status": "adopted",
+      "note": "15 个工具；无需下载任何包，pip 装 langchain-mcp-adapters 即可"
+    }
+  ]
+}
