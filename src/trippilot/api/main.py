@@ -25,6 +25,18 @@ async def lifespan(app: FastAPI):
                 "ADD COLUMN IF NOT EXISTS steps jsonb NOT NULL DEFAULT '[]'::jsonb"
             )
         )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS conversations "
+                "ADD COLUMN IF NOT EXISTS is_deleted smallint NOT NULL DEFAULT 0"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE IF EXISTS messages "
+                "ADD COLUMN IF NOT EXISTS is_deleted smallint NOT NULL DEFAULT 0"
+            )
+        )
 
     try:
         async with AsyncPostgresSaver.from_conn_string(settings.postgres_uri) as saver:

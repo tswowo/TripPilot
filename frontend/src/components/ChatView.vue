@@ -3,6 +3,7 @@ import {
   ChatDotRound,
   CircleCheck,
   Compass,
+  Delete,
   EditPen,
   Loading,
   Plus,
@@ -302,6 +303,46 @@ async function promptRename(conv) {
   }
 }
 
+async function confirmDelete(conv) {
+  const targetId = conv?.id ?? conversationId.value
+  if (!targetId) return
+  const title =
+    conv?.title ?? conversations.value.find((c) => c.id === targetId)?.title ?? '该对话'
+
+  try {
+    await ElMessageBox.confirm(`删除「${title}」后历史消息将不再显示，确认删除？`, '删除对话', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      confirmButtonClass: 'el-button--danger',
+    })
+  } catch {
+    return
+  }
+
+  if (targetId === conversationId.value && busy.value) {
+    cancelActiveStream()
+  }
+
+  try {
+    await api(`/conversations/${targetId}`, undefined, 'DELETE')
+    conversations.value = conversations.value.filter((c) => c.id !== targetId)
+    if (targetId === conversationId.value) {
+      newConversation()
+    }
+    if (conversations.value.length < 10 && convHasMore.value) {
+      loadConversations(false)
+    }
+    ElMessage.success('对话已删除')
+  } catch (e) {
+    if (e.status === 401) {
+      emit('logout')
+      return
+    }
+    ElMessage.error(e.message)
+  }
+}
+
 function cancelActiveStream() {
   const ctrl = abortController
   abortController = null
@@ -453,14 +494,24 @@ function fallbackText(m) {
         >
           <el-icon class="conv-icon"><ChatDotRound /></el-icon>
           <span class="conv-title" :title="c.title">{{ c.title }}</span>
-          <button
-            type="button"
-            class="rename-icon-btn"
-            title="重命名会话"
-            @click.stop="promptRename(c)"
-          >
-            <el-icon><EditPen /></el-icon>
-          </button>
+          <span class="conv-actions">
+            <button
+              type="button"
+              class="action-icon-btn"
+              title="重命名会话"
+              @click.stop="promptRename(c)"
+            >
+              <el-icon><EditPen /></el-icon>
+            </button>
+            <button
+              type="button"
+              class="action-icon-btn danger"
+              title="删除会话"
+              @click.stop="confirmDelete(c)"
+            >
+              <el-icon><Delete /></el-icon>
+            </button>
+          </span>
           <span class="conv-time">{{ formatShortTime(c.update_time) }}</span>
         </div>
         <p v-if="loadingConvs" class="side-hint">加载中…</p>
@@ -488,6 +539,16 @@ function fallbackText(m) {
             :icon="EditPen"
             title="重命名当前会话"
             @click="promptRename()"
+          />
+          <el-button
+            v-if="conversationId"
+            text
+            circle
+            size="small"
+            type="danger"
+            :icon="Delete"
+            title="删除当前会话"
+            @click="confirmDelete()"
           />
           <el-tag v-if="busy" size="small" type="primary" effect="light" round class="status-tag">
             生成中…
@@ -736,8 +797,15 @@ function fallbackText(m) {
   color: #94a3b8;
 }
 
-.rename-icon-btn {
+.conv-actions {
   display: none;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.action-icon-btn {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 3px;
@@ -748,12 +816,17 @@ function fallbackText(m) {
   cursor: pointer;
 }
 
-.rename-icon-btn:hover {
+.action-icon-btn:hover {
   background: #e2e8f0;
   color: var(--el-color-primary);
 }
 
-.conv-item:hover .rename-icon-btn {
+.action-icon-btn.danger:hover {
+  background: #fee2e2;
+  color: var(--el-color-danger);
+}
+
+.conv-item:hover .conv-actions {
   display: inline-flex;
 }
 

@@ -1,4 +1,4 @@
-"""历史会话列表、重命名与增量消息记录路由。"""
+"""历史会话列表、重命名、逻辑删除与增量消息记录路由。"""
 
 import uuid
 from datetime import datetime
@@ -11,6 +11,7 @@ from trippilot.db.conversation_repo import (
     list_conversation_messages,
     list_user_conversations,
     rename_user_conversation,
+    soft_delete_user_conversation,
 )
 from trippilot.utils.login_util import get_current_user
 
@@ -56,6 +57,23 @@ async def rename_conversation(
             detail="会话不存在或无权访问",
         )
     return updated
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    payload: Annotated[dict, Depends(get_current_user)],
+):
+    deleted = await soft_delete_user_conversation(
+        conversation_id=conversation_id,
+        user_id=payload["uid"],
+    )
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="会话不存在或无权访问",
+        )
+    return {"ok": True}
 
 
 @router.get("/conversations/{conversation_id}/messages")

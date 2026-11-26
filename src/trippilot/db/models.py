@@ -8,6 +8,7 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     Identity,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -45,6 +46,9 @@ class Conversation(Base):
     title: Mapped[str] = mapped_column(
         String(200), nullable=False, default="新会话", server_default="新会话"
     )
+    is_deleted: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default="0"
+    )
     create_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -78,6 +82,9 @@ class Message(Base):
     )
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_deleted: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default="0"
+    )
     create_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

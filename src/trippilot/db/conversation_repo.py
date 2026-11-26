@@ -1,4 +1,4 @@
-"""会话与消息表数据访问层（含短事务状态流转与双游标分页）。"""
+"""会话与消息表数据访问层（含逻辑删除过滤、短事务状态流转与双游标分页）。"""
 
 import uuid
 from collections.abc import Sequence
@@ -9,6 +9,9 @@ from sqlalchemy import func, select, update
 
 from trippilot.db.models import Conversation, Message
 from trippilot.db.session import session_scope
+
+ACTIVE = 0
+DELETED = 1
 
 
 def paginate_conversations(rows: Sequence[Conversation], limit: int) -> dict[str, Any]:
@@ -59,7 +62,7 @@ async def init_turn(
     is_new_conversation: bool,
 ) -> bool:
     """流开始前的短事务：
-    1. 新会话创建 Conversation，或旧会话校验归属并刷新 update_time；
+    1. 新会话创建 Conversation，或旧会话校验归属、未逻辑删除并刷新 update_time；
     2. 写入同 turn_id 的 user 消息（completed）与空 assistant 占位消息（streaming）。
     """
     async with session_scope() as db:
@@ -69,11 +72,12 @@ async def init_turn(
                     id=conversation_id,
                     user_id=user_id,
                     title=user_message[:200],
+                    is_deleted=ACTIVE,
                 )
             )
         else:
             conv = await db.get(Conversation, conversation_id)
-            if conv is None or conv.user_id != user_id:
+            if conv is None or conv.user_id != user_id or conv.is_deleted != ACTIVE:
                 return False
             conv.update_time = func.now()
 
@@ -86,6 +90,7 @@ async def init_turn(
                     content=user_message,
                     steps=[],
                     status="completed",
+                    is_deleted=ACTIVE,
                 ),
                 Message(
                     conversation_id=conversation_id,
@@ -94,6 +99,7 @@ async def init_turn(
                     content="",
                     steps=[],
                     status="streaming",
+                    is_deleted=ACTIVE,
                 ),
             ]
         )
@@ -110,7 +116,7 @@ async def finalize_turn(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> None:
-    """流结束（或中断/异常）后的短事务：全量回写 assistant 的 content、steps 与状态。"""
+    """流结束（或中断/异常）后的短事务：仅对未逻辑删除的记录回写最终内容与状态。"""
     async with session_scope() as db:
         await db.execute(
             update(Message)
@@ -118,6 +124,7 @@ async def finalize_turn(
                 Message.conversation_id == conversation_id,
                 Message.turn_id == turn_id,
                 Message.role == "assistant",
+                Message.is_deleted == ACTIVE,
             )
             .values(
                 content=content,
@@ -130,7 +137,10 @@ async def finalize_turn(
         )
         await db.execute(
             update(Conversation)
-            .where(Conversation.id == conversation_id)
+            .where(
+                Conversation.id == conversation_id,
+                Conversation.is_deleted == ACTIVE,
+            )
             .values(update_time=func.now())
         )
 
@@ -141,8 +151,11 @@ async def list_user_conversations(
     limit: int = 20,
     cursor: datetime | None = None,
 ) -> dict[str, Any]:
-    """游标分页查询指定用户的会话列表。"""
-    stmt = select(Conversation).where(Conversation.user_id == user_id)
+    """游标分页查询指定用户的有效会话列表（is_deleted = 0）。"""
+    stmt = select(Conversation).where(
+        Conversation.user_id == user_id,
+        Conversation.is_deleted == ACTIVE,
+    )
     if cursor is not None:
         stmt = stmt.where(Conversation.update_time < cursor)
     stmt = stmt.order_by(Conversation.update_time.desc()).limit(limit + 1)
@@ -163,6 +176,7 @@ async def rename_user_conversation(
         .where(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
+            Conversation.is_deleted == ACTIVE,
         )
         .values(
             title=title,
@@ -180,6 +194,38 @@ async def rename_user_conversation(
         }
 
 
+async def soft_delete_user_conversation(
+    *,
+    conversation_id: uuid.UUID,
+    user_id: int,
+) -> bool:
+    """在应用层单事务内级联逻辑删除会话及其下属消息（0 -> 1）。"""
+    conv_stmt = (
+        update(Conversation)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
+            Conversation.is_deleted == ACTIVE,
+        )
+        .values(is_deleted=DELETED, update_time=func.now())
+        .returning(Conversation.id)
+    )
+    msg_stmt = (
+        update(Message)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.is_deleted == ACTIVE,
+        )
+        .values(is_deleted=DELETED, update_time=func.now())
+    )
+    async with session_scope() as db:
+        deleted_id = (await db.scalars(conv_stmt)).one_or_none()
+        if deleted_id is None:
+            return False
+        await db.execute(msg_stmt)
+        return True
+
+
 async def list_conversation_messages(
     *,
     conversation_id: uuid.UUID,
@@ -187,13 +233,16 @@ async def list_conversation_messages(
     limit: int = 20,
     cursor: int | None = None,
 ) -> dict[str, Any] | None:
-    """游标分页查询指定会话的历史消息；若会话不存在或不属于该用户则返回 None。"""
+    """游标分页查询指定有效会话的有效历史消息；若会话不存在、已删除或无权访问则返回 None。"""
     async with session_scope() as db:
         conv = await db.get(Conversation, conversation_id)
-        if conv is None or conv.user_id != user_id:
+        if conv is None or conv.user_id != user_id or conv.is_deleted != ACTIVE:
             return None
 
-        stmt = select(Message).where(Message.conversation_id == conversation_id)
+        stmt = select(Message).where(
+            Message.conversation_id == conversation_id,
+            Message.is_deleted == ACTIVE,
+        )
         if cursor is not None:
             stmt = stmt.where(Message.id < cursor)
         stmt = stmt.order_by(Message.id.desc()).limit(limit + 1)
