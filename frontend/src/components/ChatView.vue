@@ -1,7 +1,7 @@
 <script setup>
 import { nextTick, onMounted, ref } from 'vue'
 
-import { api } from '../api'
+import { apiStream } from '../api'
 
 defineProps({ user: Object })
 const emit = defineEmits(['logout'])
@@ -14,6 +14,7 @@ const input = ref('')
 const busy = ref(false)
 const error = ref('')
 const listEl = ref(null)
+let abortController = null
 
 onMounted(() => {
   try {
@@ -40,34 +41,69 @@ async function scrollToEnd() {
   listEl.value?.scrollTo({ top: listEl.value.scrollHeight })
 }
 
+function stopStream() {
+  abortController?.abort()
+}
+
 async function send() {
   const text = input.value.trim()
   if (!text || busy.value) return
   error.value = ''
   input.value = ''
   messages.value.push({ role: 'user', content: text })
+  messages.value.push({ role: 'assistant', content: '' })
+  const assistantIndex = messages.value.length - 1
   scrollToEnd()
   busy.value = true
+  abortController = new AbortController()
+
   try {
-    const data = await api('/chat', { message: text, conversation_id: conversationId.value })
-    conversationId.value = data.conversation_id
-    messages.value.push({ role: 'assistant', content: data.content })
+    await apiStream(
+      '/chat',
+      { message: text, conversation_id: conversationId.value },
+      {
+        signal: abortController.signal,
+        onEvent(event, data) {
+          if (event === 'meta' && data.conversation_id) {
+            conversationId.value = data.conversation_id
+            persist()
+          } else if (event === 'delta' && data.content) {
+            messages.value[assistantIndex].content += data.content
+            scrollToEnd()
+          } else if (event === 'error' && data.message) {
+            error.value = data.message
+          } else if (event === 'done') {
+            persist()
+          }
+        },
+      },
+    )
     persist()
     scrollToEnd()
   } catch (e) {
+    if (e.name === 'AbortError') {
+      if (!messages.value[assistantIndex].content) {
+        messages.value[assistantIndex].content = '（已停止生成）'
+      }
+      persist()
+      return
+    }
     if (e.status === 401) {
       emit('logout')
       return
     }
-    messages.value.pop()
+    // 请求在建立流之前失败（如 404），回滚刚塞入的 user 与空 assistant 气泡
+    messages.value.splice(assistantIndex - 1, 2)
     input.value = text
     error.value = e.message
   } finally {
     busy.value = false
+    abortController = null
   }
 }
 
 function newConversation() {
+  abortController?.abort()
   messages.value = []
   conversationId.value = null
   error.value = ''
@@ -87,15 +123,15 @@ function newConversation() {
     <div ref="listEl" class="messages">
       <p v-if="messages.length === 0" class="hint">开始你的旅行规划吧，比如：帮我规划杭州两天。</p>
       <div v-for="(m, i) in messages" :key="i" :class="['bubble', m.role]">
-        {{ m.content }}
+        {{ m.content || (busy && i === messages.length - 1 ? '思考中…' : '') }}
       </div>
-      <p v-if="busy" class="hint">思考中…</p>
     </div>
 
     <p v-if="error" class="error">{{ error }}</p>
     <form @submit.prevent="send">
       <input v-model="input" placeholder="输入你的旅行需求…" :disabled="busy" />
-      <button type="submit" :disabled="busy || !input.trim()">发送</button>
+      <button v-if="busy" type="button" class="stop-btn" @click="stopStream">停止</button>
+      <button v-else type="submit" :disabled="!input.trim()">发送</button>
     </form>
   </section>
 </template>
@@ -167,6 +203,9 @@ form button {
   border-radius: 8px;
   background: #3b82f6;
   color: #fff;
+}
+form button.stop-btn {
+  background: #ef4444;
 }
 .error {
   margin: 8px 0 0;

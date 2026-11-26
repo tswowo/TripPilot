@@ -1,8 +1,12 @@
+import asyncio
+import json
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from langchain_core.messages import HumanMessage
+from fastapi.responses import StreamingResponse
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
@@ -13,6 +17,12 @@ from trippilot.utils.login_util import get_current_user
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
+SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",  # 禁用 Nginx 反代缓冲，防止 SSE 被攒批才吐出
+}
+
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
@@ -21,6 +31,11 @@ class ChatRequest(BaseModel):
 
 def get_graph(request: Request) -> Any:
     return request.app.state.graph
+
+
+def format_sse(event: str, data: dict[str, Any]) -> str:
+    """格式化标准 SSE 帧：event + JSON data + 双换行"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 async def create_conversation(conversation_id: str, user_id: int, title: str) -> None:
@@ -73,9 +88,10 @@ async def touch_conversation(conversation_id: str) -> None:
 
 @router.post("/chat")
 async def chat(
-    request: ChatRequest,
-    payload: Annotated[dict, Depends(get_current_user)],
-    graph: Annotated[Any, Depends(get_graph)],
+        request: ChatRequest,
+        raw_request: Request,
+        payload: Annotated[dict, Depends(get_current_user)],
+        graph: Annotated[Any, Depends(get_graph)],
 ):
     user_id: int = payload["uid"]
 
@@ -92,12 +108,30 @@ async def chat(
             )
         await touch_conversation(conversation_id)
 
-    # 2. 调用 LangGraph（当前非流式，直接返回最终回复；后续 SSE 见 /api/plan/stream）
     config = {"configurable": {"thread_id": conversation_id}}
-    result = await graph.ainvoke(
-        {"messages": [HumanMessage(content=request.message)]},
-        config,
-    )
-    reply = result["messages"][-1].content
-    return {"conversation_id": conversation_id, "content": str(reply)}
 
+    # 2. 构造 SSE 异步生成器，支持逐 Token 推送与客户端断连优雅取消
+    async def event_generator() -> AsyncIterator[str]:
+        yield format_sse("meta", {"conversation_id": conversation_id})
+        try:
+            async for chunk, _metadata in graph.astream(
+                    {"messages": [HumanMessage(content=request.message)]},
+                    config,
+                    stream_mode="messages",
+            ):
+                if await raw_request.is_disconnected():
+                    break
+                if isinstance(chunk, AIMessageChunk) and chunk.content:
+                    yield format_sse("delta", {"content": str(chunk.content)})
+            yield format_sse("done", {"conversation_id": conversation_id})
+        except asyncio.CancelledError:
+            # 客户端主动断连（如点击“停止”按钮），向上抛出以及时终止下游 LLM 生成，防止白烧 Token
+            raise
+        except Exception as exc:
+            yield format_sse("error", {"message": str(exc)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
