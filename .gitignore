@@ -47,6 +47,10 @@ dist/
 # Node & local tooling
 node_modules/
 .npm/
+.vite/
+.eslintcache
+*.tsbuildinfo
+*.local
 .qoder/
 
 # Editor, OS & temporary files
