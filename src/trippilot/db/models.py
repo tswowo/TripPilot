@@ -7,7 +7,6 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     DateTime,
-    ForeignKey,
     Identity,
     String,
     Text,
@@ -18,7 +17,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from trippilot.db import Base
+from trippilot.db.session import Base
 
 
 class User(Base):
@@ -42,9 +41,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
-    user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     title: Mapped[str] = mapped_column(
         String(200), nullable=False, default="新会话", server_default="新会话"
     )

@@ -63,8 +63,8 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 @asynccontextmanager
 async def session_scope() -> AsyncIterator[AsyncSession]:
-    """短事务上下文管理器：
-    进入时从连接池借连接并开启事务，正常退出自动 commit，异常自动 rollback，随后立即归还连接。
+    """短事务上下文管理器（对标 Spring @Transactional）：
+    进入时借连接并开启事务，正常退出自动 commit，异常自动 rollback，随后立即归还连接。
     """
     factory = get_session_factory()
     async with factory.begin() as session:
