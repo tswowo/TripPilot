@@ -27,7 +27,7 @@ function logout() {
 
 <template>
   <main class="shell">
-    <p v-if="checking" class="hint">加载中…</p>
+    <div v-if="checking" v-loading="true" class="boot-loading" element-loading-text="正在加载工作台…" />
     <AuthForm v-else-if="!user" @logged-in="user = $event" />
     <ChatView v-else :user="user" @logout="logout" />
   </main>
@@ -37,26 +37,31 @@ function logout() {
 * {
   box-sizing: border-box;
 }
+html,
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  background: #f5f6f8;
+  height: 100%;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  background: linear-gradient(135deg, #eef3fb 0%, #f6f8fc 100%);
   color: #1f2329;
 }
+#app {
+  height: 100%;
+}
 .shell {
-  max-width: 1080px;
+  max-width: 1260px;
+  height: 100vh;
   margin: 0 auto;
-  padding: 20px 16px;
+  padding: 16px;
 }
-.hint {
-  color: #8a919f;
-  text-align: center;
-}
-button {
-  cursor: pointer;
-}
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
+.boot-loading {
+  height: 100%;
+  border-radius: 16px;
 }
 </style>

@@ -13,6 +13,10 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "dompurify": "^3.5.0",
+    "element-plus": "^2.14.8",
+    "markdown-it": "^15.0.3",
     "vue": "^3.5.42"
   },
   "devDependencies": {

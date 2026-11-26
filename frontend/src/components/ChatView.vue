@@ -1,12 +1,30 @@
 <script setup>
-import { nextTick, onMounted, ref } from 'vue'
+import {
+  ChatDotRound,
+  CircleCheck,
+  Compass,
+  Loading,
+  Plus,
+  Promotion,
+  SwitchButton,
+  Tools,
+  VideoPause,
+} from '@element-plus/icons-vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 
 import { api, apiStream } from '../api'
+import MarkdownView from './MarkdownView.vue'
 
 const props = defineProps({ user: Object })
 const emit = defineEmits(['logout'])
 
 const activeConvKey = () => `trippilot_active_conv_${props.user.id}`
+
+const QUICK_PROMPTS = [
+  '帮我联网查一下南京博物院最新的预约放票时间和闭馆规则',
+  '周五晚从上海出发去南京玩周末两天，两人预算 1800 元怎么安排？',
+  '苏州园林两日游推荐路线，避开人流高峰怎么走？',
+]
 
 // 左侧会话列表游标分页状态
 const conversations = ref([])
@@ -35,6 +53,14 @@ let switchSeq = 0
 let suppressScrollLoad = false
 let stickToBottom = true
 let lastKnownScrollTop = 0
+
+const currentTitle = computed(() => {
+  if (!conversationId.value) return '新旅行规划'
+  const hit = conversations.value.find((c) => c.id === conversationId.value)
+  return hit?.title || '历史对话'
+})
+
+const userInitial = computed(() => (props.user?.username || 'U').slice(0, 1).toUpperCase())
 
 onMounted(async () => {
   localStorage.removeItem('trippilot_chat')
@@ -69,7 +95,6 @@ async function scrollToEnd(force = false) {
   if (!stickToBottom) return
   await nextTick()
   const el = listEl.value
-  // 二次检查：若 nextTick 等待期间用户向上滚轮解除了吸附，绝不强拉回底部
   if (!el || (!force && !stickToBottom)) return
   el.scrollTop = el.scrollHeight
   lastKnownScrollTop = el.scrollTop
@@ -176,7 +201,6 @@ async function loadOlderMessages() {
     const data = await api(`/conversations/${targetConvId}/messages?${params.toString()}`)
     if (seq !== switchSeq || conversationId.value !== targetConvId) return
 
-    // 在真正向头部插入 DOM 前一刻采样高度，避免请求期间底部流式输出增长干扰锚定差值
     const el = listEl.value
     const prevHeight = el?.scrollHeight ?? 0
     const prevTop = el?.scrollTop ?? 0
@@ -185,7 +209,6 @@ async function loadOlderMessages() {
     msgHasMore.value = data.has_more
     msgNextCursor.value = data.next_cursor
 
-    // 视口锚定：抵消头部插入历史消息带来的 scrollHeight 增量，保持阅读视线零闪跳
     await nextTick()
     if (el) {
       el.scrollTop = el.scrollHeight - prevHeight + prevTop
@@ -209,10 +232,8 @@ function onMsgScroll() {
   const distanceFromBottom = el.scrollHeight - currentTop - el.clientHeight
 
   if (currentTop < lastKnownScrollTop - 2) {
-    // 用户主动向上滚动：立即解除底部跟随，不打断阅读
     stickToBottom = false
   } else if (distanceFromBottom <= STICKY_BOTTOM_THRESHOLD) {
-    // 滑回底部阈值内：恢复跟随流式输出
     stickToBottom = true
   }
   lastKnownScrollTop = currentTop
@@ -249,10 +270,23 @@ function stopStream() {
   if (last && last.role === 'assistant' && last.status === 'streaming') {
     last.status = 'failed'
     if (!last.content) {
-      last.content = '（已停止生成）'
+      last.content = '*（已停止生成）*'
     }
   }
   cancelActiveStream()
+}
+
+function onInputKeydown(e) {
+  // 避开中文输入法候选词回车上屏误触发送
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    send()
+  }
+}
+
+function applyPrompt(promptText) {
+  input.value = promptText
+  send()
 }
 
 async function send() {
@@ -306,7 +340,7 @@ async function send() {
       if (target) {
         target.status = 'failed'
         if (!target.content) {
-          target.content = '（已停止生成）'
+          target.content = '*（已停止生成）*'
         }
       }
       return
@@ -339,32 +373,41 @@ function newConversation() {
   localStorage.removeItem(activeConvKey())
 }
 
-function displayContent(m, index) {
-  if (m.content) return m.content
-  if (busy.value && index === messages.value.length - 1) return '思考中…'
-  if (m.status === 'failed') return m.error_message ? `（${m.error_message}）` : '（已停止生成）'
-  if (m.status === 'streaming') return '（正在生成或已中断…）'
+function fallbackText(m) {
+  if (m.status === 'failed') return m.error_message ? `*（${m.error_message}）*` : '*（已停止生成）*'
+  if (m.status === 'streaming') return '*（正在生成或已中断…）*'
   return ''
 }
 </script>
 
 <template>
   <div class="workspace">
-    <!-- 左侧会话列表栏 -->
+    <!-- 左侧会话导航栏 -->
     <aside class="sidebar">
-      <div class="sidebar-top">
-        <strong>TripPilot</strong>
-        <button class="new-btn" @click="newConversation">+ 新会话</button>
+      <div class="sidebar-brand">
+        <div class="logo-badge">
+          <el-icon :size="18"><Compass /></el-icon>
+        </div>
+        <span class="brand-name">TripPilot</span>
       </div>
 
+      <el-button type="primary" plain :icon="Plus" class="new-conv-btn" @click="newConversation">
+        新建旅行规划
+      </el-button>
+
       <div ref="convListEl" class="conv-list" @scroll="onConvScroll">
-        <p v-if="!loadingConvs && conversations.length === 0" class="side-hint">暂无历史会话</p>
+        <el-empty
+          v-if="!loadingConvs && conversations.length === 0"
+          :image-size="56"
+          description="暂无历史对话"
+        />
         <div
           v-for="c in conversations"
           :key="c.id"
           :class="['conv-item', { active: c.id === conversationId }]"
           @click="selectConversation(c.id)"
         >
+          <el-icon class="conv-icon"><ChatDotRound /></el-icon>
           <span class="conv-title" :title="c.title">{{ c.title }}</span>
           <span class="conv-time">{{ formatShortTime(c.update_time) }}</span>
         </div>
@@ -372,46 +415,160 @@ function displayContent(m, index) {
       </div>
 
       <div class="sidebar-footer">
-        <span class="user">{{ user.username }}</span>
-        <button class="logout-btn" @click="emit('logout')">退出</button>
+        <div class="user-info">
+          <el-avatar :size="28" class="user-avatar">{{ userInitial }}</el-avatar>
+          <span class="username" :title="user.username">{{ user.username }}</span>
+        </div>
+        <el-button text size="small" :icon="SwitchButton" @click="emit('logout')">退出</el-button>
       </div>
     </aside>
 
-    <!-- 右侧聊天主视口 -->
-    <section class="chat">
-      <div ref="listEl" class="messages" @scroll="onMsgScroll">
-        <p v-if="loadingOlder" class="top-hint">加载更早消息中…</p>
-        <p v-else-if="messages.length > 0 && !msgHasMore" class="top-hint">已加载全部历史消息</p>
+    <!-- 右侧聊天主面板 -->
+    <section class="chat-panel">
+      <header class="chat-header">
+        <div class="header-title">
+          <span>{{ currentTitle }}</span>
+          <el-tag v-if="busy" size="small" type="primary" effect="light" round class="status-tag">
+            生成中…
+          </el-tag>
+        </div>
+      </header>
 
-        <p v-if="loadingMsgs" class="hint">正在加载会话记录…</p>
-        <p v-else-if="messages.length === 0" class="hint">
-          开始你的旅行规划吧，比如：帮我规划杭州两天。
-        </p>
+      <div ref="listEl" v-loading="loadingMsgs" class="messages" @scroll="onMsgScroll">
+        <p v-if="loadingOlder" class="top-hint">正在加载更早记录…</p>
+        <p v-else-if="messages.length > 0 && !msgHasMore" class="top-hint">已到对话顶部</p>
 
-        <div v-for="(m, i) in messages" :key="m.id ?? `tmp-${i}`" :class="['bubble', m.role]">
-          <details v-if="m.steps?.length" class="steps-box">
-            <summary>已执行 {{ m.steps.length }} 个步骤</summary>
-            <ul>
-              <li v-for="s in m.steps" :key="s.step">
-                #{{ s.step }} [{{ s.node }}]
-                <span v-if="s.tools">调用工具: {{ s.tools.join(', ') }}</span>
-                <span v-else-if="s.results">
-                  工具返回: {{ s.results.map((r) => r.tool).join(', ') }}
-                </span>
-                <span v-else>节点完成</span>
-              </li>
-            </ul>
-          </details>
-          <div>{{ displayContent(m, i) }}</div>
+        <!-- 空会话引导页 -->
+        <div v-if="!loadingMsgs && messages.length === 0" class="welcome">
+          <div class="welcome-icon">
+            <el-icon :size="32"><Compass /></el-icon>
+          </div>
+          <h2>下一站想去哪里？</h2>
+          <p>支持联网检索最新景区公告，后续将接入高德路网与美团实时票务酒旅核验</p>
+          <div class="prompt-grid">
+            <button
+              v-for="p in QUICK_PROMPTS"
+              :key="p"
+              type="button"
+              class="prompt-chip"
+              @click="applyPrompt(p)"
+            >
+              {{ p }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 消息流 -->
+        <div v-for="(m, i) in messages" :key="m.id ?? `tmp-${i}`" :class="['msg-row', m.role]">
+          <el-avatar v-if="m.role === 'assistant'" :size="32" class="ai-avatar">
+            <el-icon :size="17"><Compass /></el-icon>
+          </el-avatar>
+
+          <div :class="['bubble', m.role]">
+            <!-- Agent 工具与节点执行轨迹 -->
+            <details v-if="m.steps?.length" class="steps-card">
+              <summary>
+                <el-icon v-if="busy && i === messages.length - 1" class="is-loading step-icon">
+                  <Loading />
+                </el-icon>
+                <el-icon v-else class="step-icon done"><CircleCheck /></el-icon>
+                <span>已执行 {{ m.steps.length }} 个推理/工具步骤</span>
+              </summary>
+              <div class="steps-list">
+                <div v-for="s in m.steps" :key="s.step" class="step-row">
+                  <span class="step-idx">#{{ s.step }}</span>
+                  <el-tag size="small" type="info" effect="plain">{{ s.node }}</el-tag>
+                  <template v-if="s.tools">
+                    <span class="step-desc">调用</span>
+                    <el-tag
+                      v-for="t in s.tools"
+                      :key="t"
+                      size="small"
+                      type="primary"
+                      effect="light"
+                    >
+                      <el-icon style="margin-right: 3px"><Tools /></el-icon>{{ t }}
+                    </el-tag>
+                  </template>
+                  <template v-else-if="s.results">
+                    <span class="step-desc">返回</span>
+                    <el-tag
+                      v-for="(r, ri) in s.results"
+                      :key="ri"
+                      size="small"
+                      :type="r.status === 'error' ? 'danger' : 'success'"
+                      effect="light"
+                    >
+                      {{ r.tool }} ({{ r.status === 'error' ? '异常重试' : '成功' }})
+                    </el-tag>
+                  </template>
+                  <span v-else class="step-desc">节点完成</span>
+                </div>
+              </div>
+            </details>
+
+            <!-- 用户纯文本 / AI Markdown 渲染 -->
+            <div v-if="m.role === 'user'" class="user-text">{{ m.content }}</div>
+            <template v-else>
+              <div v-if="!m.content && busy && i === messages.length - 1" class="thinking">
+                <el-icon class="is-loading"><Loading /></el-icon>
+                <span>正在思考与检索信息…</span>
+              </div>
+              <MarkdownView v-else :content="m.content || fallbackText(m)" />
+            </template>
+          </div>
+
+          <el-avatar v-if="m.role === 'user'" :size="32" class="user-avatar">
+            {{ userInitial }}
+          </el-avatar>
         </div>
       </div>
 
-      <p v-if="error" class="error">{{ error }}</p>
-      <form @submit.prevent="send">
-        <input v-model="input" placeholder="输入你的旅行需求…" :disabled="busy || loadingMsgs" />
-        <button v-if="busy" type="button" class="stop-btn" @click="stopStream">停止</button>
-        <button v-else type="submit" :disabled="loadingMsgs || !input.trim()">发送</button>
-      </form>
+      <!-- 底部输入区 -->
+      <footer class="composer">
+        <el-alert
+          v-if="error"
+          :title="error"
+          type="error"
+          show-icon
+          closable
+          class="composer-error"
+          @close="error = ''"
+        />
+        <div class="composer-box">
+          <el-input
+            v-model="input"
+            type="textarea"
+            :autosize="{ minRows: 1, maxRows: 5 }"
+            resize="none"
+            placeholder="输入你的旅行需求（Enter 发送，Shift + Enter 换行）…"
+            :disabled="loadingMsgs"
+            class="composer-input"
+            @keydown="onInputKeydown"
+          />
+          <el-button
+            v-if="busy"
+            type="danger"
+            :icon="VideoPause"
+            round
+            class="action-btn"
+            @click="stopStream"
+          >
+            停止
+          </el-button>
+          <el-button
+            v-else
+            type="primary"
+            :icon="Promotion"
+            round
+            class="action-btn"
+            :disabled="loadingMsgs || !input.trim()"
+            @click="send"
+          >
+            发送
+          </el-button>
+        </div>
+      </footer>
     </section>
   </div>
 </template>
@@ -420,179 +577,404 @@ function displayContent(m, index) {
 .workspace {
   display: flex;
   gap: 16px;
-  height: calc(100vh - 40px);
+  height: 100%;
 }
 
 /* 左侧边栏 */
 .sidebar {
-  width: 260px;
+  width: 272px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   background: #fff;
-  border-radius: 12px;
-  padding: 14px 12px;
+  border: 1px solid #e5eaf3;
+  border-radius: 16px;
+  padding: 16px 12px;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 4%);
 }
-.sidebar-top {
+
+.sidebar-brand {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 4px 12px;
-  border-bottom: 1px solid #eef0f4;
+  gap: 10px;
+  padding: 0 6px 14px;
 }
-.new-btn {
-  padding: 6px 10px;
-  border: 1px solid #3b82f6;
-  border-radius: 8px;
-  background: #eff6ff;
-  color: #2563eb;
-  font-size: 13px;
+
+.logo-badge {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
+
+.brand-name {
+  font-size: 17px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.2px;
+}
+
+.new-conv-btn {
+  width: 100%;
+  border-radius: 10px;
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+
 .conv-list {
   flex: 1;
   overflow-y: auto;
-  margin: 10px 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
+  padding-right: 2px;
 }
+
 .conv-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   padding: 9px 10px;
-  border-radius: 8px;
+  border-radius: 10px;
   cursor: pointer;
-  transition: background 0.15s;
+  color: #334155;
+  transition: all 0.15s;
 }
+
 .conv-item:hover {
-  background: #f5f6f8;
+  background: #f1f5f9;
 }
+
 .conv-item.active {
-  background: #eff6ff;
-  color: #1d4ed8;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
   font-weight: 500;
 }
+
+.conv-icon {
+  flex-shrink: 0;
+  font-size: 15px;
+  opacity: 0.75;
+}
+
 .conv-title {
   flex: 1;
-  font-size: 14px;
+  font-size: 13.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .conv-time {
   flex-shrink: 0;
   font-size: 11px;
-  color: #9ca3af;
+  color: #94a3b8;
 }
+
 .side-hint {
-  margin: 12px 0;
+  margin: 10px 0;
   font-size: 12px;
-  color: #9ca3af;
+  color: #94a3b8;
   text-align: center;
 }
+
 .sidebar-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 4px 0;
-  border-top: 1px solid #eef0f4;
+  padding: 12px 4px 0;
+  margin-top: 8px;
+  border-top: 1px solid #eef2f7;
 }
-.sidebar-footer .user {
-  font-size: 13px;
-  color: #646a73;
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.user-avatar {
+  background: #3b82f6;
+  color: #fff;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.username {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #334155;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.logout-btn {
-  padding: 5px 10px;
-  border: 1px solid #d0d3d9;
-  border-radius: 6px;
-  background: #fff;
-  font-size: 12px;
-}
 
-/* 右侧聊天主视口 */
-.chat {
+/* 右侧聊天主面板 */
+.chat-panel {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  background: #fff;
+  border: 1px solid #e5eaf3;
+  border-radius: 16px;
+  box-shadow: 0 4px 16px rgb(15 23 42 / 4%);
+  overflow: hidden;
 }
+
+.chat-header {
+  padding: 13px 20px;
+  border-bottom: 1px solid #eef2f7;
+  background: #fafbfe;
+}
+
+.header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;
+  padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px;
-  background: #fff;
-  border-radius: 12px;
+  gap: 18px;
 }
+
 .top-hint {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: 12px;
-  color: #9ca3af;
+  color: #94a3b8;
   text-align: center;
 }
-.bubble {
-  max-width: 80%;
-  padding: 10px 14px;
-  border-radius: 12px;
-  white-space: pre-wrap;
-  line-height: 1.6;
+
+/* 欢迎空状态 */
+.welcome {
+  margin: auto;
+  max-width: 560px;
+  text-align: center;
+  padding: 24px 12px;
 }
-.bubble.user {
-  align-self: flex-end;
-  background: #3b82f6;
+
+.welcome-icon {
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 14px;
+  border-radius: 16px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.welcome h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  color: #0f172a;
+}
+
+.welcome p {
+  margin: 0 0 20px;
+  font-size: 13.5px;
+  color: #64748b;
+}
+
+.prompt-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.prompt-chip {
+  text-align: left;
+  padding: 11px 15px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.prompt-chip:hover {
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+
+/* 消息行与气泡 */
+.msg-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.msg-row.user {
+  justify-content: flex-end;
+}
+
+.ai-avatar {
+  background: linear-gradient(135deg, #2563eb, #0ea5e9);
   color: #fff;
+  flex-shrink: 0;
+  margin-top: 2px;
 }
+
+.bubble {
+  max-width: min(82%, 780px);
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+
+.bubble.user {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: #fff;
+  border-top-right-radius: 4px;
+  box-shadow: 0 2px 8px rgb(37 99 235 / 18%);
+}
+
+.user-text {
+  white-space: pre-wrap;
+  line-height: 1.65;
+  font-size: 14.5px;
+  word-break: break-word;
+}
+
 .bubble.assistant {
-  align-self: flex-start;
-  background: #f0f2f5;
+  background: #f8fafc;
+  border: 1px solid #e8eef5;
+  border-top-left-radius: 4px;
 }
-.steps-box {
-  margin-bottom: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px dashed #d0d3d9;
-  font-size: 12px;
-  color: #646a73;
+
+/* 推理与工具调用折叠条 */
+.steps-card {
+  margin-bottom: 10px;
+  padding: 7px 11px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  font-size: 12.5px;
+  color: #475569;
 }
-.steps-box summary {
+
+.steps-card summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   cursor: pointer;
   user-select: none;
+  font-weight: 500;
+  list-style: none;
 }
-.steps-box ul {
-  margin: 4px 0 0;
-  padding-left: 18px;
+
+.steps-card summary::-webkit-details-marker {
+  display: none;
 }
-form {
-  display: flex;
-  gap: 8px;
-  padding-top: 12px;
-}
-input {
-  flex: 1;
-  padding: 10px 12px;
-  border: 1px solid #d0d3d9;
-  border-radius: 8px;
+
+.step-icon {
   font-size: 14px;
+  color: var(--el-color-primary);
 }
-form button {
-  padding: 10px 20px;
-  border: none;
-  border-radius: 8px;
-  background: #3b82f6;
-  color: #fff;
+
+.step-icon.done {
+  color: var(--el-color-success);
 }
-form button.stop-btn {
-  background: #ef4444;
+
+.steps-list {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.error {
-  margin: 8px 0 0;
-  color: #dc2626;
-  font-size: 13px;
+
+.step-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.step-idx {
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+.step-desc {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #64748b;
+  font-size: 13.5px;
+  padding: 2px 0;
+}
+
+/* 底部输入区 */
+.composer {
+  padding: 12px 20px 16px;
+  border-top: 1px solid #eef2f7;
+  background: #fff;
+}
+
+.composer-error {
+  margin-bottom: 10px;
+}
+
+.composer-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid #dbe2ee;
+  border-radius: 14px;
+  background: #f8fafc;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    box-shadow 0.15s;
+}
+
+.composer-box:focus-within {
+  background: #fff;
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 3px rgb(59 130 246 / 10%);
+}
+
+.composer-input :deep(.el-textarea__inner) {
+  padding: 4px 0;
+  border: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+
+.action-btn {
+  flex-shrink: 0;
+  padding: 0 18px;
+  height: 36px;
+  font-weight: 500;
 }
 </style>

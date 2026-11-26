@@ -1,4 +1,5 @@
 <script setup>
+import { Compass, Lock, User } from '@element-plus/icons-vue'
 import { ref } from 'vue'
 
 import { api, setToken } from '../api'
@@ -12,7 +13,7 @@ const error = ref('')
 const busy = ref(false)
 
 async function submit() {
-  if (busy.value) return
+  if (busy.value || !username.value.trim() || !password.value) return
   error.value = ''
   busy.value = true
   try {
@@ -30,81 +31,118 @@ async function submit() {
 </script>
 
 <template>
-  <section class="card">
-    <h1>TripPilot</h1>
-    <div class="tabs">
-      <button :class="{ active: mode === 'login' }" @click="mode = 'login'">登录</button>
-      <button :class="{ active: mode === 'register' }" @click="mode = 'register'">注册</button>
-    </div>
-    <form @submit.prevent="submit">
-      <input v-model="username" placeholder="用户名" autocomplete="username" required />
-      <input
-        v-model="password"
-        type="password"
-        placeholder="密码"
-        autocomplete="current-password"
-        required
-      />
-      <button type="submit" :disabled="busy">
-        {{ busy ? '请稍候…' : mode === 'login' ? '登录' : '注册并登录' }}
-      </button>
-    </form>
-    <p v-if="error" class="error">{{ error }}</p>
-  </section>
+  <div class="auth-wrap">
+    <el-card class="auth-card" shadow="hover">
+      <div class="brand">
+        <div class="brand-icon">
+          <el-icon :size="26"><Compass /></el-icon>
+        </div>
+        <div>
+          <h1>TripPilot</h1>
+          <p>智能旅行规划引擎 · 实时检索与多源核验</p>
+        </div>
+      </div>
+
+      <el-tabs v-model="mode" stretch class="auth-tabs">
+        <el-tab-pane label="账号登录" name="login" />
+        <el-tab-pane label="新用户注册" name="register" />
+      </el-tabs>
+
+      <el-form @submit.prevent="submit">
+        <el-form-item>
+          <el-input
+            v-model="username"
+            size="large"
+            placeholder="请输入用户名"
+            :prefix-icon="User"
+            autocomplete="username"
+          />
+        </el-form-item>
+        <el-form-item>
+          <el-input
+            v-model="password"
+            size="large"
+            type="password"
+            show-password
+            placeholder="请输入密码（至少 6 位）"
+            :prefix-icon="Lock"
+            autocomplete="current-password"
+            @keyup.enter="submit"
+          />
+        </el-form-item>
+
+        <el-alert
+          v-if="error"
+          :title="error"
+          type="error"
+          show-icon
+          :closable="false"
+          class="auth-error"
+        />
+
+        <el-button
+          type="primary"
+          size="large"
+          :loading="busy"
+          native-type="submit"
+          class="submit-btn"
+        >
+          {{ mode === 'login' ? '登 录' : '注册并进入' }}
+        </el-button>
+      </el-form>
+    </el-card>
+  </div>
 </template>
 
 <style scoped>
-.card {
-  max-width: 360px;
-  margin: 80px auto;
-  padding: 32px;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 2px 12px rgb(0 0 0 / 8%);
-}
-h1 {
-  margin: 0 0 20px;
-  text-align: center;
-}
-.tabs {
+.auth-wrap {
+  height: 100%;
   display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
+  align-items: center;
+  justify-content: center;
 }
-.tabs button {
-  flex: 1;
-  padding: 8px;
-  border: 1px solid #d0d3d9;
-  border-radius: 8px;
-  background: #fff;
+.auth-card {
+  width: 400px;
+  border-radius: 16px;
+  border: 1px solid #e5eaf3;
 }
-.tabs button.active {
-  border-color: #3b82f6;
-  color: #3b82f6;
-  font-weight: 600;
-}
-form {
+.brand {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 12px;
+  margin-bottom: 20px;
 }
-input {
-  padding: 10px 12px;
-  border: 1px solid #d0d3d9;
-  border-radius: 8px;
-  font-size: 14px;
-}
-form button {
-  padding: 10px;
-  border: none;
-  border-radius: 8px;
-  background: #3b82f6;
+.brand-icon {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
   color: #fff;
-  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
-.error {
-  margin: 12px 0 0;
-  color: #dc2626;
-  font-size: 13px;
+.brand h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.brand p {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: #64748b;
+}
+.auth-tabs {
+  margin-bottom: 8px;
+}
+.auth-error {
+  margin-bottom: 14px;
+}
+.submit-btn {
+  width: 100%;
+  border-radius: 10px;
+  font-weight: 600;
 }
 </style>
