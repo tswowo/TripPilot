@@ -44,9 +44,9 @@ body {
   color: #1f2329;
 }
 .shell {
-  max-width: 760px;
+  max-width: 1080px;
   margin: 0 auto;
-  padding: 24px 16px;
+  padding: 20px 16px;
 }
 .hint {
   color: #8a919f;
