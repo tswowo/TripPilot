@@ -4,12 +4,9 @@ from typing import Annotated
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 from trippilot.config import get_settings
-from trippilot.db import session_scope
-from trippilot.models import User
+from trippilot.db.user_repo import create_user, get_user_by_username
 from trippilot.utils.login_util import create_access_token, get_current_user
 
 router = APIRouter(prefix="/api", tags=["auth"])
@@ -25,11 +22,8 @@ async def register(request: LoginRequest):
     password_hash = bcrypt.hashpw(
         request.password.encode("utf-8"), bcrypt.gensalt()
     ).decode("utf-8")
-    user = User(username=request.username, password_hash=password_hash)
-    try:
-        async with session_scope() as db:
-            db.add(user)
-    except IntegrityError:
+    user = await create_user(request.username, password_hash)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="用户已存在"
         )
@@ -39,12 +33,11 @@ async def register(request: LoginRequest):
 @router.post("/login")
 async def login(request: LoginRequest):
     settings = get_settings()
-    async with session_scope() as db:
-        user = await db.scalar(select(User).where(User.username == request.username))
+    user = await get_user_by_username(request.username)
 
     if not user or not bcrypt.checkpw(
-            request.password.encode("utf-8"),
-            user.password_hash.encode("utf-8"),
+        request.password.encode("utf-8"),
+        user.password_hash.encode("utf-8"),
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
