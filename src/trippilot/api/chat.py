@@ -1,6 +1,7 @@
 """核心对话 SSE 流式网关路由（薄 Controller，串联持久化 Repo 与 Agent 核心流）。"""
 
 import asyncio
+import contextlib
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -22,6 +23,8 @@ SSE_HEADERS = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
+
+_SENTINEL = object()
 
 
 class ChatRequest(BaseModel):
@@ -77,27 +80,58 @@ async def chat(
         )
         chunks: list[str] = []
         steps: list[dict[str, Any]] = []
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        client_disconnected = False
+
+        async def run_graph() -> None:
+            try:
+                async for kind, event_data in stream_graph_events(
+                    graph,
+                    thread_id=conv_id_str,
+                    user_message=request.message,
+                ):
+                    await queue.put((kind, event_data))
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
+                await queue.put(exc)
+            finally:
+                await queue.put(_SENTINEL)
+
+        async def watch_disconnect(target_task: asyncio.Task[None]) -> None:
+            nonlocal client_disconnected
+            while not target_task.done():
+                if await raw_request.is_disconnected():
+                    client_disconnected = True
+                    target_task.cancel()
+                    return
+                await asyncio.sleep(0.2)
+
+        graph_task = asyncio.create_task(run_graph())
+        watcher_task = asyncio.create_task(watch_disconnect(graph_task))
 
         try:
-            async for kind, event_data in stream_graph_events(
-                graph,
-                thread_id=conv_id_str,
-                user_message=request.message,
-            ):
-                if await raw_request.is_disconnected():
-                    await asyncio.shield(
-                        finalize_turn(
-                            conversation_id=conv_uuid,
-                            turn_id=turn_uuid,
-                            content="".join(chunks),
-                            steps=steps,
-                            msg_status="failed",
-                            error_code="CLIENT_DISCONNECTED",
-                            error_message="客户端已断开连接",
+            while True:
+                item = await queue.get()
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, asyncio.CancelledError):
+                    if client_disconnected:
+                        await asyncio.shield(
+                            finalize_turn(
+                                conversation_id=conv_uuid,
+                                turn_id=turn_uuid,
+                                content="".join(chunks),
+                                steps=steps,
+                                msg_status="failed",
+                                error_code="CLIENT_DISCONNECTED",
+                                error_message="已停止生成",
+                            )
                         )
-                    )
-                    return
+                        return
+                    raise item
+                if isinstance(item, BaseException):
+                    raise item
 
+                kind, event_data = item
                 if kind == "delta":
                     chunks.append(event_data)
                     yield format_sse("delta", {"content": event_data})
@@ -117,6 +151,7 @@ async def chat(
             yield format_sse("done", {"conversation_id": conv_id_str, "turn_id": turn_id_str})
 
         except asyncio.CancelledError:
+            graph_task.cancel()
             await asyncio.shield(
                 finalize_turn(
                     conversation_id=conv_uuid,
@@ -125,7 +160,7 @@ async def chat(
                     steps=steps,
                     msg_status="failed",
                     error_code="CANCELLED",
-                    error_message="用户中止生成",
+                    error_message="已停止生成",
                 )
             )
             raise
@@ -142,6 +177,14 @@ async def chat(
                 )
             )
             yield format_sse("error", {"message": str(exc)})
+        finally:
+            watcher_task.cancel()
+            if not graph_task.done():
+                graph_task.cancel()
+            with contextlib.suppress(BaseException):
+                await watcher_task
+            with contextlib.suppress(BaseException):
+                await graph_task
 
     return StreamingResponse(
         event_generator(),

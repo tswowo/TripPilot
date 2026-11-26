@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -16,6 +16,32 @@ SYSTEM_PROMPT = (
     "优先调用 `web_search` 联网检索；若摘要信息不足，再对具体链接调用 `web_fetch` 精读正文。\n"
     "- 严禁凭空捏造具体车次、航班号、实时票价、余票或酒店房价；未通过工具核实的价格与余票必须明确说明。"
 )
+
+
+def patch_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """
+    为带有 tool_calls 的悬空 AIMessage 补齐取消态 ToolMessage，实现会话无损自愈。
+    """
+    existing_tool_ids = {
+        m.tool_call_id for m in messages if isinstance(m, ToolMessage) and m.tool_call_id
+    }
+    repaired: list[BaseMessage] = []
+    for msg in messages:
+        repaired.append(msg)
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tc_id = tc.get("id")
+                if tc_id and tc_id not in existing_tool_ids:
+                    repaired.append(
+                        ToolMessage(
+                            content="该工具调用因用户中途停止生成而被取消。",
+                            tool_call_id=tc_id,
+                            name=tc.get("name") or "unknown",
+                            status="error",
+                        )
+                    )
+                    existing_tool_ids.add(tc_id)
+    return repaired
 
 
 def build_graph(
@@ -34,16 +60,17 @@ def build_graph(
     bound_model = model.bind_tools(active_tools) if active_tools else model
 
     async def call_model(state: MessagesState):
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+        healed_history = patch_dangling_tool_calls(state["messages"])
+        messages = [SystemMessage(content=SYSTEM_PROMPT)] + healed_history
         response = await bound_model.ainvoke(messages)
         return {"messages": [response]}
 
     graph = StateGraph(MessagesState)
     graph.add_node("model", call_model)
+
     graph.add_edge(START, "model")
     if active_tools:
         graph.add_node("tools", ToolNode(active_tools, handle_tool_errors=True))
         graph.add_conditional_edges("model", tools_condition)
         graph.add_edge("tools", "model")
-
     return graph.compile(checkpointer=checkpointer)

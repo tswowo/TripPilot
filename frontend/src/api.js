@@ -26,7 +26,13 @@ export async function api(path, body) {
   return data
 }
 
+function makeAbortError() {
+  return new DOMException('The operation was aborted.', 'AbortError')
+}
+
 export async function apiStream(path, body, { onEvent, signal } = {}) {
+  if (signal?.aborted) throw makeAbortError()
+
   const headers = {
     Accept: 'text/event-stream',
     'Content-Type': 'application/json',
@@ -54,6 +60,19 @@ export async function apiStream(path, body, { onEvent, signal } = {}) {
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
 
+  // fetch 响应头返回后，模型思考或跑工具期间流上可能数秒无字节；
+  // 显式监听 abort 并主动 reader.cancel()，确保点击“停止”瞬间解除 reader.read() 阻塞
+  const onAbort = () => {
+    reader.cancel().catch(() => {})
+  }
+  if (signal) {
+    if (signal.aborted) {
+      onAbort()
+      throw makeAbortError()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  }
+
   const processBlock = (block) => {
     const lines = block.split('\n')
     let event = 'message'
@@ -76,17 +95,22 @@ export async function apiStream(path, body, { onEvent, signal } = {}) {
     }
   }
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split(/\r?\n\r?\n/)
-    buffer = parts.pop() ?? ''
-    for (const block of parts) {
-      if (block.trim()) processBlock(block)
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (signal?.aborted) throw makeAbortError()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split(/\r?\n\r?\n/)
+      buffer = parts.pop() ?? ''
+      for (const block of parts) {
+        if (block.trim()) processBlock(block)
+      }
     }
-  }
-  if (buffer.trim()) {
-    processBlock(buffer)
+    if (buffer.trim()) {
+      processBlock(buffer)
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
   }
 }

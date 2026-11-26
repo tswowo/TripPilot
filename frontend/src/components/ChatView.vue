@@ -104,7 +104,7 @@ function onConvScroll() {
 
 async function selectConversation(id) {
   if (id === conversationId.value && !error.value && messages.value.length > 0) return
-  if (busy.value) abortController?.abort()
+  if (busy.value) cancelActiveStream()
 
   const seq = ++switchSeq
   conversationId.value = id
@@ -212,8 +212,22 @@ function upsertSidebarConversation(id, fallbackTitle) {
   }
 }
 
+function cancelActiveStream() {
+  const ctrl = abortController
+  abortController = null
+  busy.value = false
+  ctrl?.abort()
+}
+
 function stopStream() {
-  abortController?.abort()
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'assistant' && last.status === 'streaming') {
+    last.status = 'failed'
+    if (!last.content) {
+      last.content = '（已停止生成）'
+    }
+  }
+  cancelActiveStream()
 }
 
 async function send() {
@@ -226,8 +240,9 @@ async function send() {
   const assistantIndex = messages.value.length - 1
   await scrollToEnd()
 
+  const controller = new AbortController()
+  abortController = controller
   busy.value = true
-  abortController = new AbortController()
   const seq = switchSeq
 
   try {
@@ -235,9 +250,9 @@ async function send() {
       '/chat',
       { message: text, conversation_id: conversationId.value },
       {
-        signal: abortController.signal,
+        signal: controller.signal,
         onEvent(event, data) {
-          if (seq !== switchSeq) return
+          if (seq !== switchSeq || controller.signal.aborted) return
           if (event === 'meta' && data.conversation_id) {
             conversationId.value = data.conversation_id
             localStorage.setItem(activeConvKey(), data.conversation_id)
@@ -261,10 +276,13 @@ async function send() {
     if (seq === switchSeq) await scrollToEnd()
   } catch (e) {
     if (seq !== switchSeq) return
-    if (e.name === 'AbortError') {
-      messages.value[assistantIndex].status = 'failed'
-      if (!messages.value[assistantIndex].content) {
-        messages.value[assistantIndex].content = '（已停止生成）'
+    if (e.name === 'AbortError' || controller.signal.aborted) {
+      const target = messages.value[assistantIndex]
+      if (target) {
+        target.status = 'failed'
+        if (!target.content) {
+          target.content = '（已停止生成）'
+        }
       }
       return
     }
@@ -276,7 +294,7 @@ async function send() {
     input.value = text
     error.value = e.message
   } finally {
-    if (seq === switchSeq) {
+    if (abortController === controller) {
       busy.value = false
       abortController = null
     }
@@ -284,7 +302,7 @@ async function send() {
 }
 
 function newConversation() {
-  if (busy.value) abortController?.abort()
+  if (busy.value) cancelActiveStream()
   switchSeq++
   conversationId.value = null
   messages.value = []
@@ -298,6 +316,7 @@ function displayContent(m, index) {
   if (m.content) return m.content
   if (busy.value && index === messages.value.length - 1) return '思考中…'
   if (m.status === 'failed') return m.error_message ? `（${m.error_message}）` : '（已停止生成）'
+  if (m.status === 'streaming') return '（正在生成或已中断…）'
   return ''
 }
 </script>
