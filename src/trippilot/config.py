@@ -20,11 +20,15 @@ class Settings(BaseSettings):
     amap_maps_api_key: str = ""
     meituan_ht_token: str = ""
     meituan_raw_json: bool = True
-
+    # pg
     postgres_uri: str = ""
 
     amap_mcp_base_url: str = "https://mcp.amap.com/mcp"
     request_timeout_s: float = 60.0
+    # JWT
+    secret_key: str = ""
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
 
 
 @lru_cache
