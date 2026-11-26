@@ -19,6 +19,7 @@ dependencies = [
     "langgraph-checkpoint-postgres>=3.2.1",
     "pyjwt>=2.15.1",
     "bcrypt>=5.0.0",
+    "sqlalchemy[asyncio]>=2.0",
 ]
 
 [dependency-groups]
