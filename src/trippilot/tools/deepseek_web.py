@@ -130,14 +130,6 @@ class WebSearchInput(BaseModel):
         le=50,
         description="返回结果条数（默认10条，允许1~50条）。",
     )
-    localization: str = Field(
-        default="",
-        description="用于优先返回本地化搜索结果的 IP 地址。"
-    )
-    need_content: bool = Field(
-        default=False,
-        description="是否在 content 中返回网页正文，为 false 时 content 恒为空字符串。"
-    )
 
 
 class WebFetchInput(BaseModel):
