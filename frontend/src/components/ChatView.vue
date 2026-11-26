@@ -28,9 +28,13 @@ const input = ref('')
 const busy = ref(false)
 const error = ref('')
 
+const STICKY_BOTTOM_THRESHOLD = 40
+
 let abortController = null
 let switchSeq = 0
 let suppressScrollLoad = false
+let stickToBottom = true
+let lastKnownScrollTop = 0
 
 onMounted(async () => {
   localStorage.removeItem('trippilot_chat')
@@ -58,11 +62,17 @@ function formatShortTime(isoStr) {
   return `${mm}-${dd}`
 }
 
-async function scrollToEnd() {
-  await nextTick()
-  if (listEl.value) {
-    listEl.value.scrollTop = listEl.value.scrollHeight
+async function scrollToEnd(force = false) {
+  if (force) {
+    stickToBottom = true
   }
+  if (!stickToBottom) return
+  await nextTick()
+  const el = listEl.value
+  // 二次检查：若 nextTick 等待期间用户向上滚轮解除了吸附，绝不强拉回底部
+  if (!el || (!force && !stickToBottom)) return
+  el.scrollTop = el.scrollHeight
+  lastKnownScrollTop = el.scrollTop
 }
 
 async function loadConversations(reset = false) {
@@ -122,7 +132,7 @@ async function selectConversation(id) {
     messages.value = data.items
     msgHasMore.value = data.has_more
     msgNextCursor.value = data.next_cursor
-    await scrollToEnd()
+    await scrollToEnd(true)
   } catch (e) {
     if (seq !== switchSeq) return
     if (e.status === 401) {
@@ -156,9 +166,6 @@ async function loadOlderMessages() {
 
   const seq = switchSeq
   const targetConvId = conversationId.value
-  const el = listEl.value
-  const prevHeight = el?.scrollHeight ?? 0
-  const prevTop = el?.scrollTop ?? 0
 
   loadingOlder.value = true
   try {
@@ -169,6 +176,11 @@ async function loadOlderMessages() {
     const data = await api(`/conversations/${targetConvId}/messages?${params.toString()}`)
     if (seq !== switchSeq || conversationId.value !== targetConvId) return
 
+    // 在真正向头部插入 DOM 前一刻采样高度，避免请求期间底部流式输出增长干扰锚定差值
+    const el = listEl.value
+    const prevHeight = el?.scrollHeight ?? 0
+    const prevTop = el?.scrollTop ?? 0
+
     messages.value = [...data.items, ...messages.value]
     msgHasMore.value = data.has_more
     msgNextCursor.value = data.next_cursor
@@ -177,6 +189,7 @@ async function loadOlderMessages() {
     await nextTick()
     if (el) {
       el.scrollTop = el.scrollHeight - prevHeight + prevTop
+      lastKnownScrollTop = el.scrollTop
     }
   } catch (e) {
     if (e.status === 401) {
@@ -192,7 +205,19 @@ async function loadOlderMessages() {
 function onMsgScroll() {
   const el = listEl.value
   if (!el) return
-  if (el.scrollTop <= 20) {
+  const currentTop = el.scrollTop
+  const distanceFromBottom = el.scrollHeight - currentTop - el.clientHeight
+
+  if (currentTop < lastKnownScrollTop - 2) {
+    // 用户主动向上滚动：立即解除底部跟随，不打断阅读
+    stickToBottom = false
+  } else if (distanceFromBottom <= STICKY_BOTTOM_THRESHOLD) {
+    // 滑回底部阈值内：恢复跟随流式输出
+    stickToBottom = true
+  }
+  lastKnownScrollTop = currentTop
+
+  if (currentTop <= 20) {
     loadOlderMessages()
   }
 }
@@ -238,7 +263,7 @@ async function send() {
   messages.value.push({ role: 'user', content: text, status: 'completed' })
   messages.value.push({ role: 'assistant', content: '', steps: [], status: 'streaming' })
   const assistantIndex = messages.value.length - 1
-  await scrollToEnd()
+  await scrollToEnd(true)
 
   const controller = new AbortController()
   abortController = controller
@@ -304,6 +329,8 @@ async function send() {
 function newConversation() {
   if (busy.value) cancelActiveStream()
   switchSeq++
+  stickToBottom = true
+  lastKnownScrollTop = 0
   conversationId.value = null
   messages.value = []
   msgNextCursor.value = null
