@@ -51,7 +51,7 @@ async function send() {
   error.value = ''
   input.value = ''
   messages.value.push({ role: 'user', content: text })
-  messages.value.push({ role: 'assistant', content: '' })
+  messages.value.push({ role: 'assistant', content: '', steps: [] })
   const assistantIndex = messages.value.length - 1
   scrollToEnd()
   busy.value = true
@@ -67,6 +67,9 @@ async function send() {
           if (event === 'meta' && data.conversation_id) {
             conversationId.value = data.conversation_id
             persist()
+          } else if (event === 'step') {
+            messages.value[assistantIndex].steps.push(data)
+            scrollToEnd()
           } else if (event === 'delta' && data.content) {
             messages.value[assistantIndex].content += data.content
             scrollToEnd()
@@ -123,7 +126,18 @@ function newConversation() {
     <div ref="listEl" class="messages">
       <p v-if="messages.length === 0" class="hint">开始你的旅行规划吧，比如：帮我规划杭州两天。</p>
       <div v-for="(m, i) in messages" :key="i" :class="['bubble', m.role]">
-        {{ m.content || (busy && i === messages.length - 1 ? '思考中…' : '') }}
+        <details v-if="m.steps?.length" class="steps-box">
+          <summary>已执行 {{ m.steps.length }} 个步骤</summary>
+          <ul>
+            <li v-for="s in m.steps" :key="s.step">
+              #{{ s.step }} [{{ s.node }}]
+              <span v-if="s.tools">调用工具: {{ s.tools.join(', ') }}</span>
+              <span v-else-if="s.results">工具返回: {{ s.results.map((r) => r.tool).join(', ') }}</span>
+              <span v-else>节点完成</span>
+            </li>
+          </ul>
+        </details>
+        <div>{{ m.content || (busy && i === messages.length - 1 ? '思考中…' : '') }}</div>
       </div>
     </div>
 
@@ -184,6 +198,21 @@ header button {
 .bubble.assistant {
   align-self: flex-start;
   background: #f0f2f5;
+}
+.steps-box {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed #d0d3d9;
+  font-size: 12px;
+  color: #646a73;
+}
+.steps-box summary {
+  cursor: pointer;
+  user-select: none;
+}
+.steps-box ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
 }
 form {
   display: flex;

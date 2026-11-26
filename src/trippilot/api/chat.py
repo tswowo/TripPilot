@@ -1,17 +1,18 @@
 import asyncio
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessageChunk, HumanMessage
-from psycopg import AsyncConnection
-from psycopg.rows import dict_row
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select, update
 
-from trippilot.config import get_settings
+from trippilot.db import session_scope
+from trippilot.models import Conversation, Message
 from trippilot.utils.id_util import uuid7
 from trippilot.utils.login_util import get_current_user
 
@@ -38,96 +39,295 @@ def format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def create_conversation(conversation_id: str, user_id: int, title: str) -> None:
-    """新建会话并绑定当前用户"""
-    settings = get_settings()
-    async with (
-        await AsyncConnection.connect(settings.postgres_uri) as conn,
-        conn.cursor() as cur,
-    ):
-        await cur.execute(
-            "INSERT INTO conversations (id, user_id, title) VALUES (%s, %s, %s)",
-            (conversation_id, user_id, title[:200]),
-        )
-        await conn.commit()
+def build_step_record(step_seq: int, node_name: str, node_output: Any) -> dict[str, Any]:
+    """将单个 Superstep 节点的增量输出提炼为轻量 JSON 摘要（挂载至 messages.steps JSONB）。"""
+    record: dict[str, Any] = {
+        "step": step_seq,
+        "node": node_name,
+        "ts_ms": int(time.time() * 1000),
+    }
+    if not isinstance(node_output, dict):
+        record["action"] = "node_completed"
+        return record
 
+    msgs = node_output.get("messages") or []
+    tool_calls: list[str] = []
+    tool_results: list[dict[str, Any]] = []
 
-async def check_conversations(conversation_id: str, user_id: int) -> bool:
-    """
-    校验：会话存在 并且 归属是当前用户
-    返回 True = 合法；False = 不存在或者不属于该用户
-    """
-    settings = get_settings()
-    async with (
-        await AsyncConnection.connect(settings.postgres_uri) as conn,
-        conn.cursor(row_factory=dict_row) as cur,
-    ):
-        await cur.execute(
-            "SELECT id, user_id FROM conversations WHERE id = %s",
-            (conversation_id,),
-        )
-        row = await cur.fetchone()
-    if not row:
-        return False
-    return row["user_id"] == user_id
+    for m in msgs:
+        if isinstance(m, AIMessage) and m.tool_calls:
+            tool_calls.extend(tc["name"] for tc in m.tool_calls)
+        elif isinstance(m, ToolMessage):
+            tool_results.append(
+                {
+                    "tool": m.name or "unknown",
+                    "status": getattr(m, "status", "success"),
+                }
+            )
 
-
-async def touch_conversation(conversation_id: str) -> None:
-    """续聊时更新会话的 update_time，配合 idx_conversations_user_updated 索引排序"""
-    settings = get_settings()
-    async with (
-        await AsyncConnection.connect(settings.postgres_uri) as conn,
-        conn.cursor() as cur,
-    ):
-        await cur.execute(
-            "UPDATE conversations SET update_time = now() WHERE id = %s",
-            (conversation_id,),
-        )
-        await conn.commit()
-
-
-@router.post("/chat")
-async def chat(
-        request: ChatRequest,
-        raw_request: Request,
-        payload: Annotated[dict, Depends(get_current_user)],
-        graph: Annotated[Any, Depends(get_graph)],
-):
-    user_id: int = payload["uid"]
-
-    # 1. 新建会话 vs 已有会话归属校验
-    if request.conversation_id is None:
-        conversation_id = str(uuid7())
-        await create_conversation(conversation_id, user_id, request.message)
+    if tool_calls:
+        record["action"] = "call_tools"
+        record["tools"] = tool_calls
+    elif tool_results:
+        record["action"] = "tool_results"
+        record["results"] = tool_results
     else:
-        conversation_id = str(request.conversation_id)
-        if not await check_conversations(conversation_id, user_id):
+        record["action"] = "node_completed"
+
+    if "validation_errors" in node_output:
+        record["validation_errors"] = node_output["validation_errors"]
+
+    return record
+
+
+async def init_turn_transaction(
+    *,
+    conversation_id: uuid.UUID,
+    turn_id: uuid.UUID,
+    user_id: int,
+    user_message: str,
+    is_new_conversation: bool,
+) -> bool:
+    """流开始前的短事务（执行完立即 commit 并归还连接池，绝不在 LLM 流式期间占用连接）：
+    1. 新会话创建 Conversation，或旧会话校验归属并刷新 update_time；
+    2. 写入同 turn_id 的 user 消息（completed）与空 assistant 占位消息（streaming）。
+    """
+    async with session_scope() as db:
+        if is_new_conversation:
+            db.add(
+                Conversation(
+                    id=conversation_id,
+                    user_id=user_id,
+                    title=user_message[:200],
+                )
+            )
+        else:
+            conv = await db.get(Conversation, conversation_id)
+            if conv is None or conv.user_id != user_id:
+                return False
+            conv.update_time = func.now()
+
+        db.add_all(
+            [
+                Message(
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    role="user",
+                    content=user_message,
+                    steps=[],
+                    status="completed",
+                ),
+                Message(
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    role="assistant",
+                    content="",
+                    steps=[],
+                    status="streaming",
+                ),
+            ]
+        )
+    return True
+
+
+async def finalize_assistant_message(
+    *,
+    conversation_id: uuid.UUID,
+    turn_id: uuid.UUID,
+    content: str,
+    steps: list[dict[str, Any]],
+    msg_status: str = "completed",
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """流结束（或中断/异常）后的短事务：一次性全量回写 assistant 的 content、steps 与状态。"""
+    async with session_scope() as db:
+        await db.execute(
+            update(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.turn_id == turn_id,
+                Message.role == "assistant",
+            )
+            .values(
+                content=content,
+                steps=steps,
+                status=msg_status,
+                error_code=error_code,
+                error_message=error_message,
+                update_time=func.now(),
+            )
+        )
+        await db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(update_time=func.now())
+        )
+
+
+@router.get("/conversations")
+async def list_conversations(payload: Annotated[dict, Depends(get_current_user)]):
+    """查询当前用户的历史会话列表（按最近更新时间倒序）。"""
+    user_id: int = payload["uid"]
+    async with session_scope() as db:
+        rows = (
+            await db.scalars(
+                select(Conversation)
+                .where(Conversation.user_id == user_id)
+                .order_by(Conversation.update_time.desc())
+            )
+        ).all()
+    return [
+        {
+            "id": str(c.id),
+            "title": c.title,
+            "update_time": c.update_time.isoformat(),
+        }
+        for c in rows
+    ]
+
+
+@router.get("/conversations/{conversation_id}/messages")
+async def list_messages(
+    conversation_id: uuid.UUID,
+    payload: Annotated[dict, Depends(get_current_user)],
+):
+    """查询指定会话的历史消息及 Superstep 轨迹（含归属权校验）。"""
+    user_id: int = payload["uid"]
+    async with session_scope() as db:
+        conv = await db.get(Conversation, conversation_id)
+        if conv is None or conv.user_id != user_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="会话不存在或无权访问",
             )
-        await touch_conversation(conversation_id)
+        rows = (
+            await db.scalars(
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.id.asc())
+            )
+        ).all()
+    return [
+        {
+            "turn_id": str(m.turn_id),
+            "role": m.role,
+            "content": m.content,
+            "steps": m.steps,
+            "status": m.status,
+            "error_code": m.error_code,
+        }
+        for m in rows
+    ]
 
-    config = {"configurable": {"thread_id": conversation_id}}
 
-    # 2. 构造 SSE 异步生成器，支持逐 Token 推送与客户端断连优雅取消
+@router.post("/chat")
+async def chat(
+    request: ChatRequest,
+    raw_request: Request,
+    payload: Annotated[dict, Depends(get_current_user)],
+    graph: Annotated[Any, Depends(get_graph)],
+):
+    user_id: int = payload["uid"]
+    is_new = request.conversation_id is None
+    conv_uuid = uuid7() if is_new else request.conversation_id
+    turn_uuid = uuid7()
+    conv_id_str = str(conv_uuid)
+    turn_id_str = str(turn_uuid)
+
+    # 1. 流前短事务：校验/创建会话 + 落库同 turn_id 的 user 消息与空 assistant 消息
+    ok = await init_turn_transaction(
+        conversation_id=conv_uuid,
+        turn_id=turn_uuid,
+        user_id=user_id,
+        user_message=request.message,
+        is_new_conversation=is_new,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="会话不存在或无权访问",
+        )
+
+    config = {"configurable": {"thread_id": conv_id_str}}
+
+    # 2. SSE 双模式流式生成器：messages 推逐字 delta，updates 推 Superstep 轨迹，结束时短事务全量落盘
     async def event_generator() -> AsyncIterator[str]:
-        yield format_sse("meta", {"conversation_id": conversation_id})
+        yield format_sse("meta", {"conversation_id": conv_id_str, "turn_id": turn_id_str})
+        chunks: list[str] = []
+        steps: list[dict[str, Any]] = []
+
         try:
-            async for chunk, _metadata in graph.astream(
-                    {"messages": [HumanMessage(content=request.message)]},
-                    config,
-                    stream_mode="messages",
+            async for mode, data in graph.astream(
+                {"messages": [HumanMessage(content=request.message)]},
+                config,
+                stream_mode=["messages", "updates"],
             ):
                 if await raw_request.is_disconnected():
-                    break
-                if isinstance(chunk, AIMessageChunk) and chunk.content:
-                    yield format_sse("delta", {"content": str(chunk.content)})
-            yield format_sse("done", {"conversation_id": conversation_id})
+                    await asyncio.shield(
+                        finalize_assistant_message(
+                            conversation_id=conv_uuid,
+                            turn_id=turn_uuid,
+                            content="".join(chunks),
+                            steps=steps,
+                            msg_status="failed",
+                            error_code="CLIENT_DISCONNECTED",
+                            error_message="客户端已断开连接",
+                        )
+                    )
+                    return
+
+                if mode == "messages":
+                    chunk, _metadata = data
+                    if isinstance(chunk, AIMessageChunk) and chunk.content:
+                        piece = str(chunk.content)
+                        chunks.append(piece)
+                        yield format_sse("delta", {"content": piece})
+
+                elif mode == "updates" and isinstance(data, dict):
+                    for node_name, node_output in data.items():
+                        if node_name.startswith("__"):
+                            continue
+                        step_item = build_step_record(len(steps) + 1, node_name, node_output)
+                        steps.append(step_item)
+                        yield format_sse("step", step_item)
+
+            await asyncio.shield(
+                finalize_assistant_message(
+                    conversation_id=conv_uuid,
+                    turn_id=turn_uuid,
+                    content="".join(chunks),
+                    steps=steps,
+                    msg_status="completed",
+                )
+            )
+            yield format_sse("done", {"conversation_id": conv_id_str, "turn_id": turn_id_str})
+
         except asyncio.CancelledError:
-            # 客户端主动断连（如点击“停止”按钮），向上抛出以及时终止下游 LLM 生成，防止白烧 Token
+            await asyncio.shield(
+                finalize_assistant_message(
+                    conversation_id=conv_uuid,
+                    turn_id=turn_uuid,
+                    content="".join(chunks),
+                    steps=steps,
+                    msg_status="failed",
+                    error_code="CANCELLED",
+                    error_message="用户中止生成",
+                )
+            )
             raise
         except Exception as exc:
+            await asyncio.shield(
+                finalize_assistant_message(
+                    conversation_id=conv_uuid,
+                    turn_id=turn_uuid,
+                    content="".join(chunks),
+                    steps=steps,
+                    msg_status="failed",
+                    error_code=type(exc).__name__,
+                    error_message=str(exc)[:500],
+                )
+            )
             yield format_sse("error", {"message": str(exc)})
 
     return StreamingResponse(
