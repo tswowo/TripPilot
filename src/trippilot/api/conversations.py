@@ -1,18 +1,29 @@
-"""历史会话列表与增量消息记录路由（纯读查询 Controller）。"""
+"""历史会话列表、重命名与增量消息记录路由。"""
 
 import uuid
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, StringConstraints
 
 from trippilot.db.conversation_repo import (
     list_conversation_messages,
     list_user_conversations,
+    rename_user_conversation,
 )
 from trippilot.utils.login_util import get_current_user
 
 router = APIRouter(prefix="/api", tags=["conversations"])
+
+ConversationTitle = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+]
+
+
+class RenameConversationRequest(BaseModel):
+    title: ConversationTitle
 
 
 @router.get("/conversations")
@@ -26,6 +37,25 @@ async def list_conversations(
         limit=limit,
         cursor=cursor,
     )
+
+
+@router.patch("/conversations/{conversation_id}")
+async def rename_conversation(
+    conversation_id: uuid.UUID,
+    request: RenameConversationRequest,
+    payload: Annotated[dict, Depends(get_current_user)],
+):
+    updated = await rename_user_conversation(
+        conversation_id=conversation_id,
+        user_id=payload["uid"],
+        title=request.title,
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="会话不存在或无权访问",
+        )
+    return updated
 
 
 @router.get("/conversations/{conversation_id}/messages")

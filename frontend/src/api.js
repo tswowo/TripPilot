@@ -4,14 +4,14 @@ export const getToken = () => localStorage.getItem(TOKEN_KEY)
 export const setToken = (token) => localStorage.setItem(TOKEN_KEY, token)
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
 
-export async function api(path, body) {
+export async function api(path, body, method) {
   const headers = {}
   const token = getToken()
   if (token) headers.Authorization = `Bearer ${token}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
 
   const res = await fetch(`/api${path}`, {
-    method: body !== undefined ? 'POST' : 'GET',
+    method: method ?? (body !== undefined ? 'POST' : 'GET'),
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })

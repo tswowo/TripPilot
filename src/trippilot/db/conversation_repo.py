@@ -152,6 +152,34 @@ async def list_user_conversations(
     return paginate_conversations(rows, limit)
 
 
+async def rename_user_conversation(
+    *,
+    conversation_id: uuid.UUID,
+    user_id: int,
+    title: str,
+) -> dict[str, Any] | None:
+    stmt = (
+        update(Conversation)
+        .where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == user_id,
+        )
+        .values(
+            title=title,
+        )
+        .returning(Conversation)
+    )
+    async with session_scope() as db:
+        row = (await db.scalars(stmt)).one_or_none()
+        if row is None:
+            return None
+        return {
+            "id": str(row.id),
+            "title": row.title,
+            "update_time": row.update_time.isoformat(),
+        }
+
+
 async def list_conversation_messages(
     *,
     conversation_id: uuid.UUID,

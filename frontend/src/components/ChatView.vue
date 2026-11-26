@@ -3,6 +3,7 @@ import {
   ChatDotRound,
   CircleCheck,
   Compass,
+  EditPen,
   Loading,
   Plus,
   Promotion,
@@ -10,6 +11,7 @@ import {
   Tools,
   VideoPause,
 } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onMounted, ref } from 'vue'
 
 import { api, apiStream } from '../api'
@@ -258,6 +260,48 @@ function upsertSidebarConversation(id, fallbackTitle) {
   }
 }
 
+async function promptRename(conv) {
+  const targetId = conv?.id ?? conversationId.value
+  if (!targetId) return
+  const current =
+    conv?.title ?? conversations.value.find((c) => c.id === targetId)?.title ?? '新会话'
+
+  let value
+  try {
+    const res = await ElMessageBox.prompt('请输入新的会话名称', '重命名对话', {
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputValue: current,
+      inputValidator: (v) => {
+        const trimmed = (v ?? '').trim()
+        if (!trimmed) return '会话名称不能为空'
+        if (trimmed.length > 200) return '名称不能超过 200 个字符'
+        return true
+      },
+    })
+    value = res.value.trim()
+  } catch {
+    return
+  }
+
+  if (!value || value === current) return
+
+  try {
+    const updated = await api(`/conversations/${targetId}`, { title: value }, 'PATCH')
+    const hit = conversations.value.find((c) => c.id === targetId)
+    if (hit) {
+      hit.title = updated.title
+    }
+    ElMessage.success('会话名称已更新')
+  } catch (e) {
+    if (e.status === 401) {
+      emit('logout')
+      return
+    }
+    ElMessage.error(e.message)
+  }
+}
+
 function cancelActiveStream() {
   const ctrl = abortController
   abortController = null
@@ -409,6 +453,14 @@ function fallbackText(m) {
         >
           <el-icon class="conv-icon"><ChatDotRound /></el-icon>
           <span class="conv-title" :title="c.title">{{ c.title }}</span>
+          <button
+            type="button"
+            class="rename-icon-btn"
+            title="重命名会话"
+            @click.stop="promptRename(c)"
+          >
+            <el-icon><EditPen /></el-icon>
+          </button>
           <span class="conv-time">{{ formatShortTime(c.update_time) }}</span>
         </div>
         <p v-if="loadingConvs" class="side-hint">加载中…</p>
@@ -427,7 +479,16 @@ function fallbackText(m) {
     <section class="chat-panel">
       <header class="chat-header">
         <div class="header-title">
-          <span>{{ currentTitle }}</span>
+          <span class="header-title-text">{{ currentTitle }}</span>
+          <el-button
+            v-if="conversationId"
+            text
+            circle
+            size="small"
+            :icon="EditPen"
+            title="重命名当前会话"
+            @click="promptRename()"
+          />
           <el-tag v-if="busy" size="small" type="primary" effect="light" round class="status-tag">
             生成中…
           </el-tag>
@@ -675,6 +736,31 @@ function fallbackText(m) {
   color: #94a3b8;
 }
 
+.rename-icon-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.rename-icon-btn:hover {
+  background: #e2e8f0;
+  color: var(--el-color-primary);
+}
+
+.conv-item:hover .rename-icon-btn {
+  display: inline-flex;
+}
+
+.conv-item:hover .conv-time {
+  display: none;
+}
+
 .side-hint {
   margin: 10px 0;
   font-size: 12px;
@@ -736,10 +822,14 @@ function fallbackText(m) {
 .header-title {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   font-size: 15px;
   font-weight: 600;
   color: #0f172a;
+  min-width: 0;
+}
+
+.header-title-text {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
