@@ -1,13 +1,15 @@
 from collections.abc import Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
-from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+from pydantic import SecretStr
 
 from trippilot.config import get_settings
+from trippilot.graph.llm import PatchedChatDeepSeek
 from trippilot.tools.deepseek_web import build_deepseek_web_tools
 
 SYSTEM_PROMPT = (
@@ -19,9 +21,7 @@ SYSTEM_PROMPT = (
 
 
 def patch_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
-    """
-    为带有 tool_calls 的悬空 AIMessage 补齐取消态 ToolMessage，实现会话无损自愈。
-    """
+    """为带有 tool_calls 的悬空 AIMessage 补齐取消态 ToolMessage，实现会话无损自愈。"""
     existing_tool_ids = {
         m.tool_call_id for m in messages if isinstance(m, ToolMessage) and m.tool_call_id
     }
@@ -45,24 +45,37 @@ def patch_dangling_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessa
 
 
 def build_graph(
-        checkpointer: BaseCheckpointSaver | None = None,
-        tools: Sequence[BaseTool] | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    tools: Sequence[BaseTool] | None = None,
 ):
     settings = get_settings()
     active_tools = list(build_deepseek_web_tools(settings) if tools is None else tools)
+    secret_key = SecretStr(settings.deepseek_api_key)
 
-    model = ChatDeepSeek(
+    base_fast_model = PatchedChatDeepSeek(
         model=settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
+        api_key=secret_key,
         api_base=settings.deepseek_base_url,
         temperature=0.3,
     )
-    bound_model = model.bind_tools(active_tools) if active_tools else model
+    fast_model = base_fast_model.bind_tools(active_tools) if active_tools else base_fast_model
 
-    async def call_model(state: MessagesState):
+    base_thinking_model = PatchedChatDeepSeek(
+        model=settings.deepseek_model,
+        api_key=secret_key,
+        api_base=settings.deepseek_base_url,
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+    thinking_model = (
+        base_thinking_model.bind_tools(active_tools) if active_tools else base_thinking_model
+    )
+
+    async def call_model(state: MessagesState, config: RunnableConfig):
         healed_history = patch_dangling_tool_calls(state["messages"])
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + healed_history
-        response = await bound_model.ainvoke(messages)
+        thinking = bool(config.get("configurable", {}).get("thinking", False))
+        chosen_model = thinking_model if thinking else fast_model
+        response = await chosen_model.ainvoke(messages)
         return {"messages": [response]}
 
     graph = StateGraph(MessagesState)

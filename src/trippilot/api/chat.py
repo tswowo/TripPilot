@@ -30,6 +30,7 @@ _SENTINEL = object()
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     conversation_id: uuid.UUID | None = Field(default=None)
+    thinking: bool = Field(default=False)
 
 
 def get_graph(request: Request) -> Any:
@@ -78,10 +79,12 @@ async def chat(
                 "title": request.message[:200],
             },
         )
-        chunks: list[str] = []
+        content_chunks: list[str] = []
+        reasoning_chunks: list[str] = []
         steps: list[dict[str, Any]] = []
         queue: asyncio.Queue[Any] = asyncio.Queue()
         client_disconnected = False
+        need_reasoning_sep = False
 
         async def run_graph() -> None:
             try:
@@ -89,6 +92,7 @@ async def chat(
                     graph,
                     thread_id=conv_id_str,
                     user_message=request.message,
+                    thinking=request.thinking,
                 ):
                     await queue.put((kind, event_data))
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
@@ -119,7 +123,8 @@ async def chat(
                             finalize_turn(
                                 conversation_id=conv_uuid,
                                 turn_id=turn_uuid,
-                                content="".join(chunks),
+                                content="".join(content_chunks),
+                                reasoning_content="".join(reasoning_chunks),
                                 steps=steps,
                                 msg_status="failed",
                                 error_code="CLIENT_DISCONNECTED",
@@ -133,17 +138,26 @@ async def chat(
 
                 kind, event_data = item
                 if kind == "delta":
-                    chunks.append(event_data)
-                    yield format_sse("delta", {"content": event_data})
+                    if content := event_data.get("content"):
+                        content_chunks.append(content)
+                    if reasoning_piece := event_data.get("reasoning_content"):
+                        if need_reasoning_sep and reasoning_chunks:
+                            reasoning_chunks.append("\n\n")
+                            need_reasoning_sep = False
+                        reasoning_chunks.append(reasoning_piece)
+                    yield format_sse("delta", event_data)
                 elif kind == "step":
                     steps.append(event_data)
+                    if reasoning_chunks:
+                        need_reasoning_sep = True
                     yield format_sse("step", event_data)
 
             await asyncio.shield(
                 finalize_turn(
                     conversation_id=conv_uuid,
                     turn_id=turn_uuid,
-                    content="".join(chunks),
+                    content="".join(content_chunks),
+                    reasoning_content="".join(reasoning_chunks),
                     steps=steps,
                     msg_status="completed",
                 )
@@ -156,7 +170,8 @@ async def chat(
                 finalize_turn(
                     conversation_id=conv_uuid,
                     turn_id=turn_uuid,
-                    content="".join(chunks),
+                    content="".join(content_chunks),
+                    reasoning_content="".join(reasoning_chunks),
                     steps=steps,
                     msg_status="failed",
                     error_code="CANCELLED",
@@ -169,7 +184,8 @@ async def chat(
                 finalize_turn(
                     conversation_id=conv_uuid,
                     turn_id=turn_uuid,
-                    content="".join(chunks),
+                    content="".join(content_chunks),
+                    reasoning_content="".join(reasoning_chunks),
                     steps=steps,
                     msg_status="failed",
                     error_code=type(exc).__name__,

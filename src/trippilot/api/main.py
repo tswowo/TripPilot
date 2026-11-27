@@ -18,26 +18,6 @@ async def lifespan(app: FastAPI):
     if not settings.secret_key:
         raise RuntimeError("缺少 SECRET_KEY，无法签发 JWT")
 
-    async with get_engine().begin() as conn:
-        await conn.execute(
-            text(
-                "ALTER TABLE IF EXISTS messages "
-                "ADD COLUMN IF NOT EXISTS steps jsonb NOT NULL DEFAULT '[]'::jsonb"
-            )
-        )
-        await conn.execute(
-            text(
-                "ALTER TABLE IF EXISTS conversations "
-                "ADD COLUMN IF NOT EXISTS is_deleted smallint NOT NULL DEFAULT 0"
-            )
-        )
-        await conn.execute(
-            text(
-                "ALTER TABLE IF EXISTS messages "
-                "ADD COLUMN IF NOT EXISTS is_deleted smallint NOT NULL DEFAULT 0"
-            )
-        )
-
     try:
         async with AsyncPostgresSaver.from_conn_string(settings.postgres_uri) as saver:
             await saver.setup()

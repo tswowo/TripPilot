@@ -41,6 +41,7 @@ def paginate_messages(rows_desc: Sequence[Message], limit: int) -> dict[str, Any
             "turn_id": str(m.turn_id),
             "role": m.role,
             "content": m.content,
+            "reasoning_content": m.reasoning_content or "",
             "steps": m.steps,
             "status": m.status,
             "error_code": m.error_code,
@@ -54,12 +55,12 @@ def paginate_messages(rows_desc: Sequence[Message], limit: int) -> dict[str, Any
 
 
 async def init_turn(
-    *,
-    conversation_id: uuid.UUID,
-    turn_id: uuid.UUID,
-    user_id: int,
-    user_message: str,
-    is_new_conversation: bool,
+        *,
+        conversation_id: uuid.UUID,
+        turn_id: uuid.UUID,
+        user_id: int,
+        user_message: str,
+        is_new_conversation: bool,
 ) -> bool:
     """流开始前的短事务：
     1. 新会话创建 Conversation，或旧会话校验归属、未逻辑删除并刷新 update_time；
@@ -88,6 +89,7 @@ async def init_turn(
                     turn_id=turn_id,
                     role="user",
                     content=user_message,
+                    reasoning_content="",
                     steps=[],
                     status="completed",
                     is_deleted=ACTIVE,
@@ -97,6 +99,7 @@ async def init_turn(
                     turn_id=turn_id,
                     role="assistant",
                     content="",
+                    reasoning_content="",
                     steps=[],
                     status="streaming",
                     is_deleted=ACTIVE,
@@ -111,6 +114,7 @@ async def finalize_turn(
     conversation_id: uuid.UUID,
     turn_id: uuid.UUID,
     content: str,
+    reasoning_content: str = "",
     steps: list[dict[str, Any]],
     msg_status: str = "completed",
     error_code: str | None = None,
@@ -128,6 +132,7 @@ async def finalize_turn(
             )
             .values(
                 content=content,
+                reasoning_content=reasoning_content,
                 steps=steps,
                 status=msg_status,
                 error_code=error_code,
@@ -146,10 +151,10 @@ async def finalize_turn(
 
 
 async def list_user_conversations(
-    *,
-    user_id: int,
-    limit: int = 20,
-    cursor: datetime | None = None,
+        *,
+        user_id: int,
+        limit: int = 20,
+        cursor: datetime | None = None,
 ) -> dict[str, Any]:
     """游标分页查询指定用户的有效会话列表（is_deleted = 0）。"""
     stmt = select(Conversation).where(
@@ -166,10 +171,10 @@ async def list_user_conversations(
 
 
 async def rename_user_conversation(
-    *,
-    conversation_id: uuid.UUID,
-    user_id: int,
-    title: str,
+        *,
+        conversation_id: uuid.UUID,
+        user_id: int,
+        title: str,
 ) -> dict[str, Any] | None:
     stmt = (
         update(Conversation)
@@ -195,9 +200,9 @@ async def rename_user_conversation(
 
 
 async def soft_delete_user_conversation(
-    *,
-    conversation_id: uuid.UUID,
-    user_id: int,
+        *,
+        conversation_id: uuid.UUID,
+        user_id: int,
 ) -> bool:
     """在应用层单事务内级联逻辑删除会话及其下属消息（0 -> 1）。"""
     conv_stmt = (
@@ -227,11 +232,11 @@ async def soft_delete_user_conversation(
 
 
 async def list_conversation_messages(
-    *,
-    conversation_id: uuid.UUID,
-    user_id: int,
-    limit: int = 20,
-    cursor: int | None = None,
+        *,
+        conversation_id: uuid.UUID,
+        user_id: int,
+        limit: int = 20,
+        cursor: int | None = None,
 ) -> dict[str, Any] | None:
     """游标分页查询指定有效会话的有效历史消息；若会话不存在、已删除或无权访问则返回 None。"""
     async with session_scope() as db:

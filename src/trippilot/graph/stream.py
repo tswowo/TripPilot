@@ -53,9 +53,15 @@ async def stream_graph_events(
     *,
     thread_id: str,
     user_message: str,
+    thinking: bool = False,
 ) -> AsyncIterator[tuple[str, Any]]:
-    """驱动 LangGraph 双模式流式运行，向上游吐出 ('delta', str) 与 ('step', dict) 事件。"""
-    config = {"configurable": {"thread_id": thread_id}}
+    """驱动 LangGraph 双模式流式运行，向上游吐出 ('delta', dict) 与 ('step', dict) 事件。"""
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "thinking": thinking,
+        }
+    }
     step_seq = 0
     async for mode, data in graph.astream(
         {"messages": [HumanMessage(content=user_message)]},
@@ -64,8 +70,14 @@ async def stream_graph_events(
     ):
         if mode == "messages":
             chunk, _metadata = data
-            if isinstance(chunk, AIMessageChunk) and chunk.content:
-                yield "delta", str(chunk.content)
+            if isinstance(chunk, AIMessageChunk):
+                delta: dict[str, Any] = {}
+                if reasoning_content := chunk.additional_kwargs.get("reasoning_content"):
+                    delta["reasoning_content"] = str(reasoning_content)
+                if chunk.content:
+                    delta["content"] = str(chunk.content)
+                if delta:
+                    yield "delta", delta
         elif mode == "updates" and isinstance(data, dict):
             for node_name, node_output in data.items():
                 if node_name.startswith("__"):

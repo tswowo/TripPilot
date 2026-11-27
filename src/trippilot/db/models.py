@@ -75,7 +75,8 @@ class Message(Base):
     conversation_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
     turn_id: Mapped[uuid.UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    reasoning_content: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     steps: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="completed", server_default="completed"

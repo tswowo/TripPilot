@@ -1,11 +1,13 @@
 <script setup>
 import {
+  ArrowRight,
   ChatDotRound,
   CircleCheck,
   Compass,
   Delete,
   EditPen,
   Loading,
+  Opportunity,
   Plus,
   Promotion,
   SwitchButton,
@@ -46,6 +48,7 @@ const loadingOlder = ref(false)
 const listEl = ref(null)
 
 const input = ref('')
+const thinking = ref(false)
 const busy = ref(false)
 const error = ref('')
 
@@ -353,12 +356,46 @@ function cancelActiveStream() {
 function stopStream() {
   const last = messages.value[messages.value.length - 1]
   if (last && last.role === 'assistant' && last.status === 'streaming') {
+    finishThinkingTimer(last)
     last.status = 'failed'
     if (!last.content) {
       last.content = '*（已停止生成）*'
     }
   }
   cancelActiveStream()
+}
+
+function isActivelyThinking(m, index) {
+  return (
+    busy.value &&
+    index === messages.value.length - 1 &&
+    Boolean(m.reasoning_content) &&
+    !m.content
+  )
+}
+
+function isReasoningExpanded(m, index) {
+  if (typeof m._reasoningOpen === 'boolean') {
+    return m._reasoningOpen
+  }
+  return isActivelyThinking(m, index)
+}
+
+function toggleReasoning(m, index) {
+  m._reasoningOpen = !isReasoningExpanded(m, index)
+}
+
+function finishThinkingTimer(m) {
+  if (m._thinkingStartAt && !m.thinking_seconds) {
+    m.thinking_seconds = Math.max(1, Math.round((Date.now() - m._thinkingStartAt) / 1000))
+  }
+}
+
+function reasoningSummaryLabel(m, index) {
+  if (isActivelyThinking(m, index)) {
+    return '深度思考中…'
+  }
+  return m.thinking_seconds ? `已深度思考（用时 ${m.thinking_seconds} 秒）` : '已深度思考'
 }
 
 function onInputKeydown(e) {
@@ -380,7 +417,16 @@ async function send() {
   error.value = ''
   input.value = ''
   messages.value.push({ role: 'user', content: text, status: 'completed' })
-  messages.value.push({ role: 'assistant', content: '', steps: [], status: 'streaming' })
+  messages.value.push({
+    role: 'assistant',
+    content: '',
+    reasoning_content: '',
+    steps: [],
+    status: 'streaming',
+    _thinkingStartAt: 0,
+    _needReasoningSep: false,
+    _reasoningOpen: undefined,
+  })
   const assistantIndex = messages.value.length - 1
   await scrollToEnd(true)
 
@@ -389,30 +435,61 @@ async function send() {
   busy.value = true
   const seq = switchSeq
 
+  const appendReasoning = (target, chunkText) => {
+    if (!chunkText) return
+    if (!target._thinkingStartAt) {
+      target._thinkingStartAt = Date.now()
+    }
+    if (target._needReasoningSep && target.reasoning_content) {
+      if (!target.reasoning_content.endsWith('\n\n')) {
+        target.reasoning_content += '\n\n'
+      }
+      target._needReasoningSep = false
+    }
+    target.reasoning_content += chunkText
+    scrollToEnd()
+  }
+
   try {
     await apiStream(
       '/chat',
-      { message: text, conversation_id: conversationId.value },
+      {
+        message: text,
+        conversation_id: conversationId.value,
+        thinking: thinking.value,
+      },
       {
         signal: controller.signal,
         onEvent(event, data) {
           if (seq !== switchSeq || controller.signal.aborted) return
+          const curMsg = messages.value[assistantIndex]
           if (event === 'meta' && data.conversation_id) {
             conversationId.value = data.conversation_id
             localStorage.setItem(activeConvKey(), data.conversation_id)
             upsertSidebarConversation(data.conversation_id, data.title || text.slice(0, 50))
           } else if (event === 'step') {
-            messages.value[assistantIndex].steps.push(data)
+            curMsg.steps.push(data)
+            if (curMsg.reasoning_content) {
+              curMsg._needReasoningSep = true
+            }
             scrollToEnd()
-          } else if (event === 'delta' && data.content) {
-            messages.value[assistantIndex].content += data.content
-            scrollToEnd()
+          } else if (event === 'delta') {
+            if (data.reasoning_content) {
+              appendReasoning(curMsg, data.reasoning_content)
+            }
+            if (data.content) {
+              finishThinkingTimer(curMsg)
+              curMsg.content += data.content
+              scrollToEnd()
+            }
           } else if (event === 'error' && data.message) {
-            messages.value[assistantIndex].status = 'failed'
-            messages.value[assistantIndex].error_message = data.message
+            finishThinkingTimer(curMsg)
+            curMsg.status = 'failed'
+            curMsg.error_message = data.message
             error.value = data.message
           } else if (event === 'done') {
-            messages.value[assistantIndex].status = 'completed'
+            finishThinkingTimer(curMsg)
+            curMsg.status = 'completed'
           }
         },
       },
@@ -423,6 +500,7 @@ async function send() {
     if (e.name === 'AbortError' || controller.signal.aborted) {
       const target = messages.value[assistantIndex]
       if (target) {
+        finishThinkingTimer(target)
         target.status = 'failed'
         if (!target.content) {
           target.content = '*（已停止生成）*'
@@ -587,6 +665,29 @@ function fallbackText(m) {
           </el-avatar>
 
           <div :class="['bubble', m.role]">
+            <!-- DeepSeek 深度思考链 -->
+            <div v-if="m.role === 'assistant' && m.reasoning_content" class="reasoning-card">
+              <button
+                type="button"
+                class="reasoning-header"
+                @click="toggleReasoning(m, i)"
+              >
+                <el-icon v-if="isActivelyThinking(m, i)" class="is-loading reasoning-icon active">
+                  <Loading />
+                </el-icon>
+                <el-icon v-else class="reasoning-icon"><Opportunity /></el-icon>
+                <span>{{ reasoningSummaryLabel(m, i) }}</span>
+                <el-icon
+                  :class="['reasoning-arrow', { expanded: isReasoningExpanded(m, i) }]"
+                >
+                  <ArrowRight />
+                </el-icon>
+              </button>
+              <div v-show="isReasoningExpanded(m, i)" class="reasoning-body">
+                {{ m.reasoning_content }}
+              </div>
+            </div>
+
             <!-- Agent 工具与节点执行轨迹 -->
             <details v-if="m.steps?.length" class="steps-card">
               <summary>
@@ -632,11 +733,17 @@ function fallbackText(m) {
             <!-- 用户纯文本 / AI Markdown 渲染 -->
             <div v-if="m.role === 'user'" class="user-text">{{ m.content }}</div>
             <template v-else>
-              <div v-if="!m.content && busy && i === messages.length - 1" class="thinking">
+              <div
+                v-if="!m.content && !m.reasoning_content && busy && i === messages.length - 1"
+                class="thinking"
+              >
                 <el-icon class="is-loading"><Loading /></el-icon>
                 <span>正在思考与检索信息…</span>
               </div>
-              <MarkdownView v-else :content="m.content || fallbackText(m)" />
+              <MarkdownView
+                v-else-if="m.content || !busy || i !== messages.length - 1"
+                :content="m.content || fallbackText(m)"
+              />
             </template>
           </div>
 
@@ -668,6 +775,15 @@ function fallbackText(m) {
             class="composer-input"
             @keydown="onInputKeydown"
           />
+          <button
+            type="button"
+            :class="['think-toggle', { active: thinking }]"
+            title="开启/关闭深度思考"
+            @click="thinking = !thinking"
+          >
+            <el-icon><Opportunity /></el-icon>
+            <span>深度思考</span>
+          </button>
           <el-button
             v-if="busy"
             type="danger"
@@ -1024,6 +1140,67 @@ function fallbackText(m) {
   border-top-left-radius: 4px;
 }
 
+/* 深度思考链卡片 */
+.reasoning-card {
+  margin-bottom: 10px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.reasoning-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  border: none;
+  background: transparent;
+  color: #475569;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.reasoning-header:hover {
+  background: #e8eef5;
+}
+
+.reasoning-icon {
+  font-size: 14px;
+  color: #64748b;
+}
+
+.reasoning-icon.active {
+  color: var(--el-color-primary);
+}
+
+.reasoning-arrow {
+  margin-left: auto;
+  font-size: 12px;
+  color: #94a3b8;
+  transition: transform 0.2s ease;
+}
+
+.reasoning-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.reasoning-body {
+  padding: 2px 12px 10px 14px;
+  margin-left: 11px;
+  margin-bottom: 8px;
+  border-left: 2px solid #cbd5e1;
+  font-size: 13px;
+  line-height: 1.68;
+  color: #64748b;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* 推理与工具调用折叠条 */
 .steps-card {
   margin-bottom: 10px;
@@ -1139,5 +1316,33 @@ function fallbackText(m) {
   padding: 0 18px;
   height: 36px;
   font-weight: 500;
+}
+
+.think-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 36px;
+  padding: 0 13px;
+  border: 1px solid #dbe2ee;
+  border-radius: 18px;
+  background: #fff;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.think-toggle:hover {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+
+.think-toggle.active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
 }
 </style>
