@@ -1,17 +1,20 @@
-"""两级渐进式上下文压缩与生命周期管理中间件（ContextCompactionMiddleware）。
+"""KV-Cache 友好的锯齿形渐进式上下文压缩中间件（ContextCompactionMiddleware）。
 
-针对重度工具调用（ReAct 多跳循环）场景下的上下文膨胀问题，提供两级治理：
-1. Tier-1 零延迟历史轮次脱水（dehydrate_historical_turns，每次调模型必执行，0ms 不调 LLM）：
-   - 严格区分“历史已完成 Turn”与“当前正在执行的 Turn”（以最后一条 HumanMessage 为界）；
-   - 当前 Turn 内的 reasoning_content 与原始 ToolMessage 100% 完整保留，支撑当前多跳工具推理；
-   - 历史已完成 Turn 自动剥离过时的 reasoning_content（对齐 DeepSeek 官方跨轮次规范），
-     并将超过阈值（默认 >600 字符）的历史巨型 ToolMessage 折叠为精简回执摘要。
-2. Tier-2 轮次对齐的 LLM 结构化摘要与 Checkpoint 原地瘦身（acompact_messages_if_needed）：
-   - 当 Tier-1 脱水后总字符数仍超过阈值（默认 24,000 字符）且存在可归档的历史 Turn 时触发；
-   - 切分点严格对齐到 HumanMessage 边界，绝不切碎 AIMessage(tool_calls) 与 ToolMessage 配对（防 400 报错）；
-   - 调用轻量非思考模型增量提炼结构化《旅行上下文记忆摘要》，并通过 LangGraph RemoveMessage 原地清理旧状态；
-   - 最终组装模型输入时，保持静态 SYSTEM_PROMPT 固定在首位，将历史摘要合并于静态指令尾部（单 SystemMessage），
-     既保护大模型 Prefix KV Cache，又避免多 SystemMessage 引发网关兼容性报错。
+针对重度工具调用（ReAct 多跳循环）场景下的上下文膨胀与 Prefix KV Cache 命中率矛盾，采用工业界标准的
+“锯齿形 Append-Only 批处理压缩（Sawtooth Compaction）”架构：
+1. 常态零延迟思维链剥离（strip_historical_reasoning，每次调模型必执行，0ms 不破坏 KV Cache）：
+   - 以最后一条 HumanMessage 为界，100% 完整保留当前 Turn 的 reasoning_content 与 ToolMessage；
+   - 自动剥离历史已完成 Turn 的 reasoning_content（DeepSeek 服务端 KV Cache 在轮次结束后仅缓存 content 与 tool_calls，
+     跨轮次剥离旧 reasoning_content 是命中服务端 KV Cache 的必要前提）；
+   - 在未达高水位阈值（默认 24,000 字符）前，绝不逐轮滑动改写历史 ToolMessage 文本，保持历史消息序列严格
+     Append-Only（字节级不可变），确保连续多轮对话 100% 命中 Prefix KV Cache。
+2. 轮次入口锁与高水位批处理压缩（acompact_messages_if_needed）：
+   - 【ReAct 中途锁】：仅当处于新 Turn 入口（最后一条消息为 HumanMessage）时才允许触发压缩；在 ToolNode -> call_model
+     的多跳工具循环中途永远冻结历史前缀，杜绝中途改写前缀打穿当前轮 KV Cache；
+   - 【Turn 边界对齐】：切分点严格对齐到 HumanMessage 下标，绝不切碎 AIMessage(tool_calls) 与 ToolMessage 配对（防 400）；
+   - 【Checkpoint 原地瘦身】：超阈值时一次性调用轻量摘要模型将早期 Turn 归档为结构化《旅行上下文摘要》，
+     通过 LangGraph RemoveMessage + 固定 ID 摘要消息重置为新的不可变前缀基准（New Immutable Baseline），
+     并将摘要追加在静态 SYSTEM_PROMPT 尾部（单 SystemMessage），兼顾 Prefix Cache 与网关兼容性。
 """
 
 from __future__ import annotations
@@ -98,14 +101,8 @@ def find_turn_boundaries(messages: Sequence[BaseMessage]) -> list[int]:
     return [idx for idx, msg in enumerate(messages) if isinstance(msg, HumanMessage)]
 
 
-def dehydrate_historical_turns(
-    messages: Sequence[BaseMessage],
-    *,
-    keep_raw_tool_turns: int = DEFAULT_KEEP_RAW_TOOL_TURNS,
-    max_old_tool_chars: int = DEFAULT_MAX_OLD_TOOL_CHARS,
-    folded_preview_chars: int = DEFAULT_FOLDED_TOOL_PREVIEW_CHARS,
-) -> list[BaseMessage]:
-    """Tier-1（0ms 零延迟）：剥离历史已完成 Turn 的 reasoning_content 并折叠超长历史 ToolMessage。
+def strip_historical_reasoning(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """剥离历史已完成 Turn 的 reasoning_content，同时保持历史 ToolMessage 字节级不可变以保护 Prefix KV Cache。
 
     当前正在执行的最后一个 Turn（最后一条 HumanMessage 及其后的所有消息）100% 原样保留。
     """
@@ -114,18 +111,43 @@ def dehydrate_historical_turns(
         return list(messages)
 
     current_turn_start = turn_starts[-1]
-    # 允许保留最近 keep_raw_tool_turns 个已完成历史 Turn 的原始 ToolMessage 不折叠
+    result: list[BaseMessage] = []
+    for idx, msg in enumerate(messages):
+        if idx >= current_turn_start:
+            result.append(msg)
+            continue
+        if isinstance(msg, AIMessage):
+            kwargs = dict(msg.additional_kwargs or {})
+            if "reasoning_content" in kwargs:
+                kwargs.pop("reasoning_content", None)
+                result.append(msg.model_copy(update={"additional_kwargs": kwargs}))
+                continue
+        result.append(msg)
+    return result
+
+
+def dehydrate_historical_turns(
+    messages: Sequence[BaseMessage],
+    *,
+    keep_raw_tool_turns: int = DEFAULT_KEEP_RAW_TOOL_TURNS,
+    max_old_tool_chars: int = DEFAULT_MAX_OLD_TOOL_CHARS,
+    folded_preview_chars: int = DEFAULT_FOLDED_TOOL_PREVIEW_CHARS,
+) -> list[BaseMessage]:
+    """深度脱水：剥离历史已完成 Turn 的 reasoning_content 并折叠超长历史 ToolMessage（用于批处理归档或降级兜底）。"""
+    turn_starts = find_turn_boundaries(messages)
+    if not turn_starts:
+        return list(messages)
+
+    current_turn_start = turn_starts[-1]
     fold_cutoff_turn_idx = max(0, len(turn_starts) - 1 - max(0, keep_raw_tool_turns))
     fold_tool_before_idx = turn_starts[fold_cutoff_turn_idx]
 
     result: list[BaseMessage] = []
     for idx, msg in enumerate(messages):
-        # 当前正在执行的 Turn：100% 原样保留
         if idx >= current_turn_start:
             result.append(msg)
             continue
 
-        # 历史已完成 Turn 中的 AIMessage：剥离过时的 reasoning_content
         if isinstance(msg, AIMessage):
             kwargs = dict(msg.additional_kwargs or {})
             if "reasoning_content" in kwargs:
@@ -135,7 +157,6 @@ def dehydrate_historical_turns(
                 result.append(msg)
             continue
 
-        # 历史已完成 Turn 中的超长 ToolMessage：折叠中间原始大载荷，保留头部预览
         if (
             idx < fold_tool_before_idx
             and isinstance(msg, ToolMessage)
@@ -222,7 +243,10 @@ async def acompact_messages_if_needed(
     keep_raw_tool_turns: int = DEFAULT_KEEP_RAW_TOOL_TURNS,
     max_old_tool_chars: int = DEFAULT_MAX_OLD_TOOL_CHARS,
 ) -> CompactionResult:
-    """执行 Tier-1 零延迟脱水，并在超阈值时触发 Tier-2 轮次对齐 LLM 摘要与 Checkpoint RemoveMessage 瘦身。"""
+    """执行 KV-Cache 友好的锯齿形上下文管理：
+    1. 常态下仅剥离历史已完成 Turn 的 reasoning_content，保持历史 ToolMessage 字节级不可变以 100% 命中 Prefix KV Cache；
+    2. 仅在新 Turn 入口（最后一条消息为 HumanMessage）且总字符数突破高水位阈值时，触发一次性批处理压缩与 RemoveMessage 瘦身。
+    """
     before_chars = estimate_messages_chars(messages)
 
     existing_summaries: list[str] = []
@@ -236,26 +260,25 @@ async def acompact_messages_if_needed(
 
     current_summary = "\n".join(existing_summaries)
 
-    # 第一级：0ms 零延迟脱水（剥离旧 reasoning_content + 折叠旧 ToolMessage）
-    dehydrated = dehydrate_historical_turns(
-        dialogue_messages,
-        keep_raw_tool_turns=keep_raw_tool_turns,
-        max_old_tool_chars=max_old_tool_chars,
-    )
-    dehydrated_chars = estimate_messages_chars(dehydrated) + len(current_summary)
-    turn_starts = find_turn_boundaries(dehydrated)
+    # 常态零延迟处理：仅剥离历史已完成 Turn 的 reasoning_content，不改动历史 ToolMessage 任何字符（保 KV Cache）
+    cache_aligned = strip_historical_reasoning(dialogue_messages)
+    aligned_chars = estimate_messages_chars(cache_aligned) + len(current_summary)
+    turn_starts = find_turn_boundaries(cache_aligned)
 
-    # 判断是否需要触发第二级 LLM 结构化摘要：
-    # 条件：提供 summarizer_llm + 脱水后字符数仍超阈值 + 历史已完成 Turn 数量 > keep_recent_turns
+    # 【KV Cache 锁】：仅当处于新 Turn 入口（最后一条对话消息是 HumanMessage）时才允许触发批处理压缩；
+    # 若最后一条是 ToolMessage（处于 ReAct 工具循环中途），必须冻结前缀，确保本轮多跳调用 100% 命中前缀缓存。
+    is_turn_entry = bool(dialogue_messages and isinstance(dialogue_messages[-1], HumanMessage))
     min_turns_for_compact = max(1, keep_recent_turns) + 1
+
     if (
-        summarizer_llm is None
-        or dehydrated_chars <= trigger_chars
+        not is_turn_entry
+        or summarizer_llm is None
+        or aligned_chars <= trigger_chars
         or len(turn_starts) < min_turns_for_compact
     ):
         model_msgs = assemble_model_messages(
             system_prompt,
-            dehydrated,
+            cache_aligned,
             summary_text=current_summary,
         )
         return CompactionResult(
@@ -263,16 +286,21 @@ async def acompact_messages_if_needed(
             state_updates=[],
             compacted=False,
             before_chars=before_chars,
-            after_chars=dehydrated_chars,
+            after_chars=aligned_chars,
         )
 
     # 切分点严格对齐到倒数第 (keep_recent_turns + 1) 个 HumanMessage 边界
     cutoff_turn_idx = len(turn_starts) - 1 - max(0, keep_recent_turns)
     split_pos = turn_starts[cutoff_turn_idx]
-    to_summarize = dehydrated[:split_pos]
-    kept_dialogue = dehydrated[split_pos:]
+    # 对即将被归档的早期历史轮次先做深度脱水，再喂给摘要模型以节省摘要 Token
+    dehydrated_for_archive = dehydrate_historical_turns(
+        cache_aligned[:split_pos],
+        keep_raw_tool_turns=keep_raw_tool_turns,
+        max_old_tool_chars=max_old_tool_chars,
+    )
+    kept_dialogue = cache_aligned[split_pos:]
 
-    transcript = _format_messages_for_summary(current_summary, to_summarize)
+    transcript = _format_messages_for_summary(current_summary, dehydrated_for_archive)
     try:
         summary_resp: Any = await summarizer_llm.ainvoke(
             [
@@ -282,10 +310,16 @@ async def acompact_messages_if_needed(
         )
         new_summary_text = str(getattr(summary_resp, "content", "") or "").strip()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("上下文压缩 LLM 摘要调用失败，优雅降级为 Tier-1 脱水视图: %s", exc)
+        logger.warning("上下文压缩 LLM 摘要调用失败，降级为历史工具折叠视图: %s", exc)
+        fallback_dehydrated = dehydrate_historical_turns(
+            cache_aligned,
+            keep_raw_tool_turns=keep_raw_tool_turns,
+            max_old_tool_chars=max_old_tool_chars,
+        )
+        fallback_chars = estimate_messages_chars(fallback_dehydrated) + len(current_summary)
         model_msgs = assemble_model_messages(
             system_prompt,
-            dehydrated,
+            fallback_dehydrated,
             summary_text=current_summary,
         )
         return CompactionResult(
@@ -293,7 +327,7 @@ async def acompact_messages_if_needed(
             state_updates=[],
             compacted=False,
             before_chars=before_chars,
-            after_chars=dehydrated_chars,
+            after_chars=fallback_chars,
         )
 
     if not new_summary_text:
@@ -318,8 +352,8 @@ async def acompact_messages_if_needed(
     )
     after_chars = estimate_messages_chars(kept_dialogue) + len(new_summary_text)
     logger.info(
-        "已触发 Tier-2 上下文压缩：归档 %d 条历史消息，字符数 %d -> %d",
-        len(to_summarize),
+        "已触发锯齿形批处理上下文压缩：归档 %d 条历史消息，字符数 %d -> %d",
+        split_pos,
         before_chars,
         after_chars,
     )

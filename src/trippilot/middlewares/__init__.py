@@ -20,6 +20,7 @@ from trippilot.middlewares.context_compaction import (
     estimate_messages_chars,
     find_turn_boundaries,
     is_compact_summary_message,
+    strip_historical_reasoning,
 )
 from trippilot.middlewares.dangling_tool_call import patch_dangling_tool_calls
 from trippilot.middlewares.tool_output import (
@@ -47,5 +48,6 @@ __all__ = [
     "is_compact_summary_message",
     "normalize_tool_content",
     "patch_dangling_tool_calls",
+    "strip_historical_reasoning",
     "unwrap_mcp_tool_call",
 ]

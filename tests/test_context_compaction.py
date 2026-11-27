@@ -30,6 +30,7 @@ from trippilot.middlewares.context_compaction import (
     dehydrate_historical_turns,
     find_turn_boundaries,
     is_compact_summary_message,
+    strip_historical_reasoning,
 )
 
 
@@ -200,6 +201,44 @@ async def test_tier2_compaction_triggers_at_turn_boundary_and_emits_remove_messa
     assert "h1" not in remaining_ids and "t1" not in remaining_ids and "h2" not in remaining_ids
     assert COMPACT_SUMMARY_MSG_ID in remaining_ids
     assert "h3" in remaining_ids and "h4" in remaining_ids and "a4_ans" in remaining_ids
+
+
+@pytest.mark.asyncio
+async def test_sawtooth_kv_cache_lock_prevents_compaction_mid_react_tool_loop():
+    """验证 KV Cache 锁：当最后一条消息是 ToolMessage（处于 ReAct 循环中途）时，即使超阈值也绝不改写历史前缀。"""
+    history = _build_two_turn_history()
+    assert isinstance(history[-1], ToolMessage)
+
+    summarizer = _FakeSummarizer()
+    res = await acompact_messages_if_needed(
+        history,
+        system_prompt="STATIC_SYS",
+        summarizer_llm=summarizer,
+        trigger_chars=100,  # 极低阈值
+        keep_recent_turns=0,
+    )
+    # 处于 ReAct 中途，绝不触发 LLM 压缩，且历史 Turn 1 的 ToolMessage 保持字节级不可变以命中 KV Cache
+    assert res.compacted is False
+    assert len(summarizer.calls) == 0
+    assert res.state_updates == []
+    # Turn 1 的 reasoning_content 被剥离（对齐服务端缓存），但 Turn 1 的 ToolMessage 原文未改一字
+    assert "reasoning_content" not in res.model_messages[2].additional_kwargs
+    assert res.model_messages[3].content == history[2].content
+    # 当前 Turn 2 的 reasoning_content 完整保留
+    assert (
+        res.model_messages[6].additional_kwargs.get("reasoning_content")
+        == "当前第二轮正在进行的思考链，必须完整保留！"
+    )
+
+
+def test_strip_historical_reasoning_keeps_tool_messages_byte_identical():
+    history = _build_two_turn_history()
+    stripped = strip_historical_reasoning(history)
+    assert "reasoning_content" not in stripped[1].additional_kwargs
+    assert "reasoning_content" not in stripped[3].additional_kwargs
+    # 历史 ToolMessage 保持 100% 字节级一致，确保未达高水位前跨轮次 Prefix KV Cache 100% 命中
+    assert stripped[2].content == history[2].content
+    assert stripped[5].additional_kwargs["reasoning_content"] == history[5].additional_kwargs["reasoning_content"]
 
 
 @pytest.mark.asyncio
