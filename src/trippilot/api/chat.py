@@ -44,10 +44,10 @@ def format_sse(event: str, data: dict[str, Any]) -> str:
 
 @router.post("/chat")
 async def chat(
-    request: ChatRequest,
-    raw_request: Request,
-    payload: Annotated[dict, Depends(get_current_user)],
-    graph: Annotated[Any, Depends(get_graph)],
+        request: ChatRequest,
+        raw_request: Request,
+        payload: Annotated[dict, Depends(get_current_user)],
+        graph: Annotated[Any, Depends(get_graph)],
 ):
     user_id: int = payload["uid"]
     is_new = request.conversation_id is None
@@ -82,6 +82,7 @@ async def chat(
         content_chunks: list[str] = []
         reasoning_chunks: list[str] = []
         steps: list[dict[str, Any]] = []
+        # todo 以后换成mq
         queue: asyncio.Queue[Any] = asyncio.Queue()
         client_disconnected = False
         need_reasoning_sep = False
@@ -89,10 +90,10 @@ async def chat(
         async def run_graph() -> None:
             try:
                 async for kind, event_data in stream_graph_events(
-                    graph,
-                    thread_id=conv_id_str,
-                    user_message=request.message,
-                    thinking=request.thinking,
+                        graph,
+                        thread_id=conv_id_str,
+                        user_message=request.message,
+                        thinking=request.thinking,
                 ):
                     await queue.put((kind, event_data))
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001
