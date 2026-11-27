@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -12,10 +11,11 @@ from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from trippilot.config import get_settings
-from trippilot.graph.llm import build_model_pair
+from trippilot.graph.llm import build_model_pair, build_summarizer_model
 from trippilot.graph.prompts import SYSTEM_PROMPT
 from trippilot.middlewares import (
     MAX_TOOL_OUTPUT_CHARS,
+    acompact_messages_if_needed,
     patch_dangling_tool_calls,
 )
 from trippilot.middlewares import (
@@ -34,14 +34,21 @@ def build_graph(
     settings = get_settings()
     active_tools = list(build_deepseek_web_tools(settings) if tools is None else tools)
     fast_model, thinking_model = build_model_pair(settings, active_tools)
+    summarizer_model = build_summarizer_model(settings)
 
     async def call_model(state: MessagesState, config: RunnableConfig):
+        # 1. 悬空 tool_calls 自愈
         healed_history = patch_dangling_tool_calls(state["messages"])
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + healed_history
+        # 2. 两级上下文压缩（Tier-1 历史轮次 0ms 脱水 + Tier-2 超阈值轮次对齐 LLM 摘要与 RemoveMessage）
+        compaction = await acompact_messages_if_needed(
+            healed_history,
+            system_prompt=SYSTEM_PROMPT,
+            summarizer_llm=summarizer_model,
+        )
         thinking = bool(config.get("configurable", {}).get("thinking", False))
         chosen_model = thinking_model if thinking else fast_model
-        response = await chosen_model.ainvoke(messages)
-        return {"messages": [response]}
+        response = await chosen_model.ainvoke(compaction.model_messages)
+        return {"messages": [*compaction.state_updates, response]}
 
     graph = StateGraph(MessagesState)
     graph.add_node("model", call_model)
