@@ -60,3 +60,6 @@ node_modules/
 *.bak
 *.swp
 *~
+/2026-8版.pdf
+/2026-12版.pdf
+/helloagents-trip-planner/
