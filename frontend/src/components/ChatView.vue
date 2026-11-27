@@ -160,7 +160,7 @@ async function selectConversation(id) {
   try {
     const data = await api(`/conversations/${id}/messages?limit=20`)
     if (seq !== switchSeq) return
-    messages.value = data.items
+    messages.value = (data.items || []).map(hydrateMessageBlocks)
     msgHasMore.value = data.has_more
     msgNextCursor.value = data.next_cursor
     await scrollToEnd(true)
@@ -211,7 +211,7 @@ async function loadOlderMessages() {
     const prevHeight = el?.scrollHeight ?? 0
     const prevTop = el?.scrollTop ?? 0
 
-    messages.value = [...data.items, ...messages.value]
+    messages.value = [...(data.items || []).map(hydrateMessageBlocks), ...messages.value]
     msgHasMore.value = data.has_more
     msgNextCursor.value = data.next_cursor
 
@@ -353,10 +353,136 @@ function cancelActiveStream() {
   ctrl?.abort()
 }
 
+function hydrateMessageBlocks(rawMsg) {
+  if (!rawMsg || rawMsg.role !== 'assistant') {
+    return rawMsg
+  }
+  const steps = Array.isArray(rawMsg.steps) ? rawMsg.steps : []
+  const isTimelineFormat = steps.length > 0 && typeof steps[0]?.type === 'string'
+
+  const blocks = []
+  if (isTimelineFormat) {
+    for (const b of steps) {
+      if (b.type === 'reasoning' && b.text) {
+        blocks.push({
+          type: 'reasoning',
+          text: b.text,
+          duration_s: b.duration_s || 0,
+          _isThinking: false,
+          _open: false,
+          _userToggled: false,
+        })
+      } else if (b.type === 'tool_round') {
+        blocks.push({
+          type: 'tool_round',
+          round: b.round || 1,
+          duration_ms: b.duration_ms ?? null,
+          calls: Array.isArray(b.calls) ? b.calls : [],
+          _open: false,
+        })
+      } else if (b.type === 'content' && b.text) {
+        blocks.push({
+          type: 'content',
+          text: b.text,
+        })
+      }
+    }
+  } else {
+    // 兼容旧版未切块历史会话数据
+    if (rawMsg.reasoning_content) {
+      blocks.push({
+        type: 'reasoning',
+        text: rawMsg.reasoning_content,
+        duration_s: rawMsg.thinking_seconds || 0,
+        _isThinking: false,
+        _open: false,
+        _userToggled: false,
+      })
+    }
+    let legacyRound = 0
+    let activeLegacyRound = null
+    for (const s of steps) {
+      if (s.action === 'call_tools' || Array.isArray(s.tools)) {
+        legacyRound++
+        const calls = (s.calls || (s.tools || []).map((t, idx) => ({ id: `${legacyRound}_${idx}`, name: t, summary: '' }))).map(
+          (c, idx) => ({
+            id: c.id || `${legacyRound}_${idx}`,
+            name: c.name || 'unknown',
+            summary: c.summary || '',
+            status: 'success',
+          }),
+        )
+        activeLegacyRound = {
+          type: 'tool_round',
+          round: legacyRound,
+          start_ts_ms: s.ts_ms || 0,
+          duration_ms: null,
+          calls,
+          _open: false,
+        }
+        blocks.push(activeLegacyRound)
+      } else if (s.action === 'tool_results' && activeLegacyRound) {
+        if (s.ts_ms && activeLegacyRound.start_ts_ms) {
+          activeLegacyRound.duration_ms = Math.max(0, s.ts_ms - activeLegacyRound.start_ts_ms)
+        }
+        for (const r of s.results || []) {
+          const hit = activeLegacyRound.calls.find((c) => (r.id && c.id === r.id) || c.name === r.tool)
+          if (hit) hit.status = r.status || 'success'
+        }
+      }
+    }
+    if (rawMsg.content) {
+      blocks.push({
+        type: 'content',
+        text: rawMsg.content,
+      })
+    }
+  }
+
+  return {
+    ...rawMsg,
+    blocks,
+  }
+}
+
+function pauseActiveReasoning(m) {
+  const blk = m?._activeReasoningBlock
+  if (!blk) return
+  if (blk._startAt) {
+    blk._elapsedMs = (blk._elapsedMs || 0) + (Date.now() - blk._startAt)
+    blk._startAt = 0
+  }
+  blk._isThinking = false
+  if (blk._elapsedMs > 0) {
+    blk.duration_s = Math.max(1, Math.round(blk._elapsedMs / 1000))
+  }
+  if (!blk._userToggled) {
+    blk._open = false
+  }
+}
+
+function finalizeMessageStream(m, { cancelled = false } = {}) {
+  if (!m) return
+  pauseActiveReasoning(m)
+  m._activeReasoningBlock = null
+  m._activeToolRoundBlock = null
+  if (cancelled && Array.isArray(m.blocks)) {
+    for (const b of m.blocks) {
+      if (b.type === 'tool_round' && Array.isArray(b.calls)) {
+        for (const c of b.calls) {
+          if (c.status === 'running') {
+            c.status = 'cancelled'
+          }
+        }
+      }
+    }
+  }
+}
+
 function stopStream() {
   const last = messages.value[messages.value.length - 1]
   if (last && last.role === 'assistant' && last.status === 'streaming') {
-    pauseThinkingTimer(last)
+    finalizeMessageStream(last, { cancelled: true })
     last.status = 'failed'
     if (!last.content) {
       last.content = '*（已停止生成）*'
@@ -365,43 +491,50 @@ function stopStream() {
   cancelActiveStream()
 }
 
-function isActivelyThinking(m, index) {
-  return (
-    busy.value &&
-    index === messages.value.length - 1 &&
-    Boolean(m._isThinking)
-  )
+function toggleReasoningBlock(block) {
+  block._open = !block._open
+  block._userToggled = true
 }
 
-function isReasoningExpanded(m, index) {
-  if (typeof m._reasoningOpen === 'boolean') {
-    return m._reasoningOpen
-  }
-  return isActivelyThinking(m, index)
-}
-
-function toggleReasoning(m, index) {
-  m._reasoningOpen = !isReasoningExpanded(m, index)
-}
-
-function pauseThinkingTimer(m) {
-  if (m._thinkingStartAt) {
-    m._thinkingElapsedMs = (m._thinkingElapsedMs || 0) + (Date.now() - m._thinkingStartAt)
-    m._thinkingStartAt = 0
-  }
-  m._isThinking = false
-  if (m._thinkingElapsedMs > 0) {
-    m.thinking_seconds = Math.max(1, Math.round(m._thinkingElapsedMs / 1000))
-  }
-}
-
-function reasoningSummaryLabel(m, index) {
-  if (isActivelyThinking(m, index)) {
-    return m.thinking_seconds
-      ? `深度思考中…（已用时 ${m.thinking_seconds} 秒）`
+function reasoningBlockLabel(block) {
+  if (block._isThinking) {
+    return block.duration_s
+      ? `深度思考中…（已用时 ${block.duration_s} 秒）`
       : '深度思考中…'
   }
-  return m.thinking_seconds ? `已深度思考（用时 ${m.thinking_seconds} 秒）` : '已深度思考'
+  return block.duration_s ? `已深度思考（用时 ${block.duration_s} 秒）` : '已深度思考'
+}
+
+function toggleToolRoundBlock(block) {
+  block._open = !block._open
+}
+
+function isToolRoundRunning(block) {
+  return Array.isArray(block.calls) && block.calls.some((c) => c.status === 'running')
+}
+
+function formatDurationMs(ms) {
+  if (ms == null || Number.isNaN(ms) || ms <= 0) return ''
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function toolStatusLabel(status) {
+  if (status === 'running') return '执行中…'
+  if (status === 'error') return '异常重试'
+  if (status === 'cancelled') return '已中断'
+  return '完成'
+}
+
+function toolStatusTagType(status) {
+  if (status === 'running') return 'primary'
+  if (status === 'error') return 'danger'
+  if (status === 'cancelled') return 'info'
+  return 'success'
+}
+
+function hasContentBlock(m) {
+  return Array.isArray(m.blocks) && m.blocks.some((b) => b.type === 'content' && b.text)
 }
 
 function onInputKeydown(e) {
@@ -428,12 +561,11 @@ async function send() {
     content: '',
     reasoning_content: '',
     steps: [],
+    blocks: [],
     status: 'streaming',
-    _thinkingStartAt: 0,
-    _thinkingElapsedMs: 0,
-    _isThinking: false,
-    _needReasoningSep: false,
-    _reasoningOpen: undefined,
+    _activeReasoningBlock: null,
+    _activeToolRoundBlock: null,
+    _toolRoundSeq: 0,
   })
   const assistantIndex = messages.value.length - 1
   await scrollToEnd(true)
@@ -446,20 +578,107 @@ async function send() {
   const appendReasoning = (target, chunkText) => {
     if (!chunkText) return
     const now = Date.now()
-    if (!target._thinkingStartAt) {
-      target._thinkingStartAt = now
-    }
-    target._isThinking = true
-    const totalMs = (target._thinkingElapsedMs || 0) + (now - target._thinkingStartAt)
-    target.thinking_seconds = Math.max(1, Math.round(totalMs / 1000))
-
-    if (target._needReasoningSep && target.reasoning_content) {
-      if (!target.reasoning_content.endsWith('\n\n')) {
-        target.reasoning_content += '\n\n'
+    const lastBlock = target.blocks[target.blocks.length - 1]
+    if (!target._activeReasoningBlock || !lastBlock || lastBlock.type !== 'reasoning') {
+      const newBlock = {
+        type: 'reasoning',
+        text: '',
+        duration_s: 1,
+        _startAt: now,
+        _elapsedMs: 0,
+        _isThinking: true,
+        _open: true,
+        _userToggled: false,
       }
-      target._needReasoningSep = false
+      target.blocks.push(newBlock)
+      target._activeReasoningBlock = newBlock
     }
+    const blk = target._activeReasoningBlock
+    if (!blk._startAt) {
+      blk._startAt = now
+    }
+    blk._isThinking = true
+    const totalMs = (blk._elapsedMs || 0) + (now - blk._startAt)
+    blk.duration_s = Math.max(1, Math.round(totalMs / 1000))
+    blk.text += chunkText
     target.reasoning_content += chunkText
+    scrollToEnd()
+  }
+
+  const handleStepEvent = (target, stepData) => {
+    pauseActiveReasoning(target)
+    target._activeReasoningBlock = null
+    target.steps.push(stepData)
+
+    const ts = stepData.ts_ms || Date.now()
+    if (stepData.action === 'call_tools') {
+      target._toolRoundSeq = (target._toolRoundSeq || 0) + 1
+      const rawCalls =
+        stepData.calls ||
+        (stepData.tools || []).map((t, i) => ({
+          id: `call_${stepData.step || 0}_${i}`,
+          name: t,
+          summary: '',
+        }))
+      const calls = rawCalls.map((c, i) => ({
+        id: c.id || `call_${target._toolRoundSeq}_${i}`,
+        name: c.name || 'unknown',
+        summary: c.summary || '',
+        status: 'running',
+      }))
+      const toolBlock = {
+        type: 'tool_round',
+        round: target._toolRoundSeq,
+        step: stepData.step || target._toolRoundSeq,
+        start_ts_ms: ts,
+        duration_ms: null,
+        calls,
+        _open: true,
+      }
+      target.blocks.push(toolBlock)
+      target._activeToolRoundBlock = toolBlock
+    } else if (stepData.action === 'tool_results') {
+      let toolBlock = target._activeToolRoundBlock
+      if (!toolBlock) {
+        for (let idx = target.blocks.length - 1; idx >= 0; idx--) {
+          if (target.blocks[idx].type === 'tool_round') {
+            toolBlock = target.blocks[idx]
+            break
+          }
+        }
+      }
+      if (toolBlock) {
+        toolBlock.duration_ms = Math.max(0, ts - (toolBlock.start_ts_ms || ts))
+        for (const res of stepData.results || []) {
+          let hit = res.id ? toolBlock.calls.find((c) => c.id === res.id) : null
+          if (!hit) {
+            hit = toolBlock.calls.find((c) => c.name === res.tool && c.status === 'running')
+          }
+          if (hit) {
+            hit.status = res.status || 'success'
+          }
+        }
+      }
+    }
+    scrollToEnd()
+  }
+
+  const appendContent = (target, contentText) => {
+    if (!contentText) return
+    pauseActiveReasoning(target)
+    target._activeReasoningBlock = null
+    target._activeToolRoundBlock = null
+    target.content += contentText
+
+    const lastBlock = target.blocks[target.blocks.length - 1]
+    if (!lastBlock || lastBlock.type !== 'content') {
+      target.blocks.push({
+        type: 'content',
+        text: contentText,
+      })
+    } else {
+      lastBlock.text += contentText
+    }
     scrollToEnd()
   }
 
@@ -481,28 +700,24 @@ async function send() {
             localStorage.setItem(activeConvKey(), data.conversation_id)
             upsertSidebarConversation(data.conversation_id, data.title || text.slice(0, 50))
           } else if (event === 'step') {
-            pauseThinkingTimer(curMsg)
-            curMsg.steps.push(data)
-            if (curMsg.reasoning_content) {
-              curMsg._needReasoningSep = true
-            }
-            scrollToEnd()
+            handleStepEvent(curMsg, data)
           } else if (event === 'delta') {
             if (data.reasoning_content) {
               appendReasoning(curMsg, data.reasoning_content)
             }
+            if (data.thinking_done) {
+              pauseActiveReasoning(curMsg)
+            }
             if (data.content) {
-              pauseThinkingTimer(curMsg)
-              curMsg.content += data.content
-              scrollToEnd()
+              appendContent(curMsg, data.content)
             }
           } else if (event === 'error' && data.message) {
-            pauseThinkingTimer(curMsg)
+            finalizeMessageStream(curMsg, { cancelled: true })
             curMsg.status = 'failed'
             curMsg.error_message = data.message
             error.value = data.message
           } else if (event === 'done') {
-            pauseThinkingTimer(curMsg)
+            finalizeMessageStream(curMsg, { cancelled: false })
             curMsg.status = 'completed'
           }
         },
@@ -514,7 +729,7 @@ async function send() {
     if (e.name === 'AbortError' || controller.signal.aborted) {
       const target = messages.value[assistantIndex]
       if (target) {
-        pauseThinkingTimer(target)
+        finalizeMessageStream(target, { cancelled: true })
         target.status = 'failed'
         if (!target.content) {
           target.content = '*（已停止生成）*'
@@ -679,84 +894,101 @@ function fallbackText(m) {
           </el-avatar>
 
           <div :class="['bubble', m.role]">
-            <!-- DeepSeek 深度思考链 -->
-            <div v-if="m.role === 'assistant' && m.reasoning_content" class="reasoning-card">
-              <button
-                type="button"
-                class="reasoning-header"
-                @click="toggleReasoning(m, i)"
-              >
-                <el-icon v-if="isActivelyThinking(m, i)" class="is-loading reasoning-icon active">
-                  <Loading />
-                </el-icon>
-                <el-icon v-else class="reasoning-icon"><Opportunity /></el-icon>
-                <span>{{ reasoningSummaryLabel(m, i) }}</span>
-                <el-icon
-                  :class="['reasoning-arrow', { expanded: isReasoningExpanded(m, i) }]"
-                >
-                  <ArrowRight />
-                </el-icon>
-              </button>
-              <div v-show="isReasoningExpanded(m, i)" class="reasoning-body">
-                {{ m.reasoning_content }}
-              </div>
-            </div>
-
-            <!-- Agent 工具与节点执行轨迹 -->
-            <details v-if="m.steps?.length" class="steps-card">
-              <summary>
-                <el-icon v-if="busy && i === messages.length - 1" class="is-loading step-icon">
-                  <Loading />
-                </el-icon>
-                <el-icon v-else class="step-icon done"><CircleCheck /></el-icon>
-                <span>已执行 {{ m.steps.length }} 个推理/工具步骤</span>
-              </summary>
-              <div class="steps-list">
-                <div v-for="s in m.steps" :key="s.step" class="step-row">
-                  <span class="step-idx">#{{ s.step }}</span>
-                  <el-tag size="small" type="info" effect="plain">{{ s.node }}</el-tag>
-                  <template v-if="s.tools">
-                    <span class="step-desc">调用</span>
-                    <el-tag
-                      v-for="t in s.tools"
-                      :key="t"
-                      size="small"
-                      type="primary"
-                      effect="light"
-                    >
-                      <el-icon style="margin-right: 3px"><Tools /></el-icon>{{ t }}
-                    </el-tag>
-                  </template>
-                  <template v-else-if="s.results">
-                    <span class="step-desc">返回</span>
-                    <el-tag
-                      v-for="(r, ri) in s.results"
-                      :key="ri"
-                      size="small"
-                      :type="r.status === 'error' ? 'danger' : 'success'"
-                      effect="light"
-                    >
-                      {{ r.tool }} ({{ r.status === 'error' ? '异常重试' : '成功' }})
-                    </el-tag>
-                  </template>
-                  <span v-else class="step-desc">节点完成</span>
-                </div>
-              </div>
-            </details>
-
-            <!-- 用户纯文本 / AI Markdown 渲染 -->
+            <!-- 用户纯文本 -->
             <div v-if="m.role === 'user'" class="user-text">{{ m.content }}</div>
+
+            <!-- AI 按轮次交错块流（思考块 / 工具轮次块 / 正文块） -->
             <template v-else>
+              <template v-for="(block, bi) in m.blocks || []" :key="bi">
+                <!-- 1. 单轮深度思考块 -->
+                <div v-if="block.type === 'reasoning'" class="reasoning-card">
+                  <button
+                    type="button"
+                    class="reasoning-header"
+                    @click="toggleReasoningBlock(block)"
+                  >
+                    <el-icon v-if="block._isThinking" class="is-loading reasoning-icon active">
+                      <Loading />
+                    </el-icon>
+                    <el-icon v-else class="reasoning-icon"><Opportunity /></el-icon>
+                    <span>{{ reasoningBlockLabel(block) }}</span>
+                    <el-icon :class="['reasoning-arrow', { expanded: block._open }]">
+                      <ArrowRight />
+                    </el-icon>
+                  </button>
+                  <div v-show="block._open" class="reasoning-body">
+                    {{ block.text }}
+                  </div>
+                </div>
+
+                <!-- 2. 单轮工具调用与原地状态流转块 -->
+                <div v-else-if="block.type === 'tool_round'" class="tool-round-card">
+                  <button
+                    type="button"
+                    class="tool-round-header"
+                    @click="toggleToolRoundBlock(block)"
+                  >
+                    <el-icon v-if="isToolRoundRunning(block)" class="is-loading step-icon">
+                      <Loading />
+                    </el-icon>
+                    <el-icon v-else class="step-icon done"><CircleCheck /></el-icon>
+                    <span class="tool-round-title">
+                      {{
+                        isToolRoundRunning(block)
+                          ? `第 ${block.round} 轮工具调用中（${block.calls?.length || 0} 项）…`
+                          : `第 ${block.round} 轮工具调用（${block.calls?.length || 0} 项）`
+                      }}
+                    </span>
+                    <span v-if="formatDurationMs(block.duration_ms)" class="tool-round-duration">
+                      {{ formatDurationMs(block.duration_ms) }}
+                    </span>
+                    <el-icon :class="['reasoning-arrow', { expanded: block._open }]">
+                      <ArrowRight />
+                    </el-icon>
+                  </button>
+                  <div v-show="block._open" class="tool-calls-list">
+                    <div v-for="(call, ci) in block.calls || []" :key="call.id || ci" class="tool-call-row">
+                      <span class="tool-name-badge">
+                        <el-icon class="tool-badge-icon"><Tools /></el-icon>
+                        <span>{{ call.name }}</span>
+                      </span>
+                      <span v-if="call.summary" class="tool-arg-summary" :title="call.summary">
+                        {{ call.summary }}
+                      </span>
+                      <el-tag
+                        size="small"
+                        :type="toolStatusTagType(call.status)"
+                        effect="light"
+                        class="tool-status-tag"
+                      >
+                        <el-icon v-if="call.status === 'running'" class="is-loading" style="margin-right: 3px">
+                          <Loading />
+                        </el-icon>
+                        {{ toolStatusLabel(call.status) }}
+                      </el-tag>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 3. Markdown 正文块 -->
+                <MarkdownView
+                  v-else-if="block.type === 'content'"
+                  :content="block.text"
+                  class="content-block"
+                />
+              </template>
+
+              <!-- 初始等待或中断兜底显示 -->
               <div
-                v-if="!m.content && !m.reasoning_content && busy && i === messages.length - 1"
+                v-if="(!m.blocks || m.blocks.length === 0) && busy && i === messages.length - 1"
                 class="thinking"
               >
                 <el-icon class="is-loading"><Loading /></el-icon>
                 <span>正在思考与检索信息…</span>
               </div>
               <MarkdownView
-                v-else-if="m.content || !busy || i !== messages.length - 1"
-                :content="m.content || fallbackText(m)"
+                v-else-if="!hasContentBlock(m) && (!busy || i !== messages.length - 1) && fallbackText(m)"
+                :content="fallbackText(m)"
               />
             </template>
           </div>
@@ -1215,29 +1447,51 @@ function fallbackText(m) {
   word-break: break-word;
 }
 
-/* 推理与工具调用折叠条 */
-.steps-card {
+/* 单轮工具调用与原地状态流转卡片 */
+.tool-round-card {
   margin-bottom: 10px;
-  padding: 7px 11px;
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 9px;
+  overflow: hidden;
   font-size: 12.5px;
   color: #475569;
 }
 
-.steps-card summary {
+.tool-round-header {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 6px;
-  cursor: pointer;
-  user-select: none;
+  padding: 7px 11px;
+  border: none;
+  background: transparent;
+  color: #475569;
+  font-size: 12.5px;
   font-weight: 500;
-  list-style: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
 }
 
-.steps-card summary::-webkit-details-marker {
-  display: none;
+.tool-round-header:hover {
+  background: #f8fafc;
+}
+
+.tool-round-title {
+  color: #334155;
+}
+
+.tool-round-duration {
+  margin-left: auto;
+  margin-right: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+.tool-round-duration + .reasoning-arrow {
+  margin-left: 0;
 }
 
 .step-icon {
@@ -1249,31 +1503,55 @@ function fallbackText(m) {
   color: var(--el-color-success);
 }
 
-.steps-list {
-  margin-top: 8px;
-  padding-top: 8px;
+.tool-calls-list {
+  padding: 6px 11px 9px;
   border-top: 1px dashed #e2e8f0;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.step-row {
+.tool-call-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
 }
 
-.step-idx {
+.tool-name-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: #f1f5f9;
+  color: #1e293b;
   font-family: ui-monospace, monospace;
-  font-size: 11.5px;
-  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 500;
 }
 
-.step-desc {
+.tool-badge-icon {
+  font-size: 12px;
+  color: #3b82f6;
+}
+
+.tool-arg-summary {
   color: #64748b;
   font-size: 12px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-status-tag {
+  margin-left: auto;
+}
+
+.content-block + .reasoning-card,
+.content-block + .tool-round-card {
+  margin-top: 10px;
 }
 
 .thinking {

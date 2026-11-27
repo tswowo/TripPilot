@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from trippilot.db.conversation_repo import finalize_turn, init_turn
-from trippilot.graph.stream import stream_graph_events
+from trippilot.graph.stream import TimelineAssembler, stream_graph_events
 from trippilot.utils.id_util import uuid7
 from trippilot.utils.login_util import get_current_user
 
@@ -79,13 +79,10 @@ async def chat(
                 "title": request.message[:200],
             },
         )
-        content_chunks: list[str] = []
-        reasoning_chunks: list[str] = []
-        steps: list[dict[str, Any]] = []
+        timeline = TimelineAssembler()
         # todo 以后换成mq
         queue: asyncio.Queue[Any] = asyncio.Queue()
         client_disconnected = False
-        need_reasoning_sep = False
 
         async def run_graph() -> None:
             try:
@@ -124,9 +121,9 @@ async def chat(
                             finalize_turn(
                                 conversation_id=conv_uuid,
                                 turn_id=turn_uuid,
-                                content="".join(content_chunks),
-                                reasoning_content="".join(reasoning_chunks),
-                                steps=steps,
+                                content="".join(timeline.content_chunks),
+                                reasoning_content="".join(timeline.reasoning_chunks),
+                                steps=timeline.finalize(cancelled=True),
                                 msg_status="failed",
                                 error_code="CLIENT_DISCONNECTED",
                                 error_message="已停止生成",
@@ -139,27 +136,19 @@ async def chat(
 
                 kind, event_data = item
                 if kind == "delta":
-                    if content := event_data.get("content"):
-                        content_chunks.append(content)
-                    if reasoning_piece := event_data.get("reasoning_content"):
-                        if need_reasoning_sep and reasoning_chunks:
-                            reasoning_chunks.append("\n\n")
-                            need_reasoning_sep = False
-                        reasoning_chunks.append(reasoning_piece)
+                    timeline.on_delta(event_data)
                     yield format_sse("delta", event_data)
                 elif kind == "step":
-                    steps.append(event_data)
-                    if reasoning_chunks:
-                        need_reasoning_sep = True
+                    timeline.on_step(event_data)
                     yield format_sse("step", event_data)
 
             await asyncio.shield(
                 finalize_turn(
                     conversation_id=conv_uuid,
                     turn_id=turn_uuid,
-                    content="".join(content_chunks),
-                    reasoning_content="".join(reasoning_chunks),
-                    steps=steps,
+                    content="".join(timeline.content_chunks),
+                    reasoning_content="".join(timeline.reasoning_chunks),
+                    steps=timeline.finalize(cancelled=False),
                     msg_status="completed",
                 )
             )
@@ -171,9 +160,9 @@ async def chat(
                 finalize_turn(
                     conversation_id=conv_uuid,
                     turn_id=turn_uuid,
-                    content="".join(content_chunks),
-                    reasoning_content="".join(reasoning_chunks),
-                    steps=steps,
+                    content="".join(timeline.content_chunks),
+                    reasoning_content="".join(timeline.reasoning_chunks),
+                    steps=timeline.finalize(cancelled=True),
                     msg_status="failed",
                     error_code="CANCELLED",
                     error_message="已停止生成",
@@ -185,9 +174,9 @@ async def chat(
                 finalize_turn(
                     conversation_id=conv_uuid,
                     turn_id=turn_uuid,
-                    content="".join(content_chunks),
-                    reasoning_content="".join(reasoning_chunks),
-                    steps=steps,
+                    content="".join(timeline.content_chunks),
+                    reasoning_content="".join(timeline.reasoning_chunks),
+                    steps=timeline.finalize(cancelled=True),
                     msg_status="failed",
                     error_code=type(exc).__name__,
                     error_message=str(exc)[:500],
