@@ -356,7 +356,7 @@ function cancelActiveStream() {
 function stopStream() {
   const last = messages.value[messages.value.length - 1]
   if (last && last.role === 'assistant' && last.status === 'streaming') {
-    finishThinkingTimer(last)
+    pauseThinkingTimer(last)
     last.status = 'failed'
     if (!last.content) {
       last.content = '*（已停止生成）*'
@@ -369,8 +369,7 @@ function isActivelyThinking(m, index) {
   return (
     busy.value &&
     index === messages.value.length - 1 &&
-    Boolean(m.reasoning_content) &&
-    !m.content
+    Boolean(m._isThinking)
   )
 }
 
@@ -385,15 +384,22 @@ function toggleReasoning(m, index) {
   m._reasoningOpen = !isReasoningExpanded(m, index)
 }
 
-function finishThinkingTimer(m) {
-  if (m._thinkingStartAt && !m.thinking_seconds) {
-    m.thinking_seconds = Math.max(1, Math.round((Date.now() - m._thinkingStartAt) / 1000))
+function pauseThinkingTimer(m) {
+  if (m._thinkingStartAt) {
+    m._thinkingElapsedMs = (m._thinkingElapsedMs || 0) + (Date.now() - m._thinkingStartAt)
+    m._thinkingStartAt = 0
+  }
+  m._isThinking = false
+  if (m._thinkingElapsedMs > 0) {
+    m.thinking_seconds = Math.max(1, Math.round(m._thinkingElapsedMs / 1000))
   }
 }
 
 function reasoningSummaryLabel(m, index) {
   if (isActivelyThinking(m, index)) {
-    return '深度思考中…'
+    return m.thinking_seconds
+      ? `深度思考中…（已用时 ${m.thinking_seconds} 秒）`
+      : '深度思考中…'
   }
   return m.thinking_seconds ? `已深度思考（用时 ${m.thinking_seconds} 秒）` : '已深度思考'
 }
@@ -424,6 +430,8 @@ async function send() {
     steps: [],
     status: 'streaming',
     _thinkingStartAt: 0,
+    _thinkingElapsedMs: 0,
+    _isThinking: false,
     _needReasoningSep: false,
     _reasoningOpen: undefined,
   })
@@ -437,9 +445,14 @@ async function send() {
 
   const appendReasoning = (target, chunkText) => {
     if (!chunkText) return
+    const now = Date.now()
     if (!target._thinkingStartAt) {
-      target._thinkingStartAt = Date.now()
+      target._thinkingStartAt = now
     }
+    target._isThinking = true
+    const totalMs = (target._thinkingElapsedMs || 0) + (now - target._thinkingStartAt)
+    target.thinking_seconds = Math.max(1, Math.round(totalMs / 1000))
+
     if (target._needReasoningSep && target.reasoning_content) {
       if (!target.reasoning_content.endsWith('\n\n')) {
         target.reasoning_content += '\n\n'
@@ -468,6 +481,7 @@ async function send() {
             localStorage.setItem(activeConvKey(), data.conversation_id)
             upsertSidebarConversation(data.conversation_id, data.title || text.slice(0, 50))
           } else if (event === 'step') {
+            pauseThinkingTimer(curMsg)
             curMsg.steps.push(data)
             if (curMsg.reasoning_content) {
               curMsg._needReasoningSep = true
@@ -478,17 +492,17 @@ async function send() {
               appendReasoning(curMsg, data.reasoning_content)
             }
             if (data.content) {
-              finishThinkingTimer(curMsg)
+              pauseThinkingTimer(curMsg)
               curMsg.content += data.content
               scrollToEnd()
             }
           } else if (event === 'error' && data.message) {
-            finishThinkingTimer(curMsg)
+            pauseThinkingTimer(curMsg)
             curMsg.status = 'failed'
             curMsg.error_message = data.message
             error.value = data.message
           } else if (event === 'done') {
-            finishThinkingTimer(curMsg)
+            pauseThinkingTimer(curMsg)
             curMsg.status = 'completed'
           }
         },
@@ -500,7 +514,7 @@ async function send() {
     if (e.name === 'AbortError' || controller.signal.aborted) {
       const target = messages.value[assistantIndex]
       if (target) {
-        finishThinkingTimer(target)
+        pauseThinkingTimer(target)
         target.status = 'failed'
         if (!target.content) {
           target.content = '*（已停止生成）*'
