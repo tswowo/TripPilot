@@ -16,6 +16,7 @@ from langchain_core.tools import BaseTool
 from trippilot.config import Settings, get_settings
 from trippilot.tools.amap import load_curated_amap_tools
 from trippilot.tools.deepseek_web import build_deepseek_web_tools
+from trippilot.tools.meituan_skill import build_meituan_skill_tools
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,13 @@ async def load_runtime_tools(settings: Settings | None = None) -> list[BaseTool]
     """加载并聚合当前环境可用的全部 Agent 工具；远端 MCP 异常时优雅降级。"""
     cfg = settings or get_settings()
     tools: list[BaseTool] = list(build_deepseek_web_tools(cfg))
+
+    if cfg.meituan_ht_token:
+        meituan_tools = build_meituan_skill_tools(cfg)
+        tools.extend(meituan_tools)
+        logger.info("已挂载美团酒旅 Skill 工具 %d 个", len(meituan_tools))
+    else:
+        logger.warning("未配置 MEITUAN_HT_TOKEN，跳过挂载美团酒旅 Skill 工具")
 
     if cfg.amap_maps_api_key:
         try:

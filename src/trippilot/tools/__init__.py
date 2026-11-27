@@ -3,11 +3,13 @@
 from trippilot.tools.amap import load_amap_tools, load_curated_amap_tools, parse_mcp_payload
 from trippilot.tools.deepseek_web import build_deepseek_web_tools
 from trippilot.tools.mcp_adapter import MCPAdaptationPolicy, curate_mcp_tools
+from trippilot.tools.meituan_skill import build_meituan_skill_tools
 from trippilot.tools.registry import load_runtime_tools
 
 __all__ = [
     "MCPAdaptationPolicy",
     "build_deepseek_web_tools",
+    "build_meituan_skill_tools",
     "curate_mcp_tools",
     "load_amap_tools",
     "load_curated_amap_tools",
