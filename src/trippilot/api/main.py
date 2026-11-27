@@ -2,14 +2,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from sqlalchemy import text
 
 from trippilot.api.auth import router as auth_router
 from trippilot.api.chat import router as chat_router
 from trippilot.api.conversations import router as conversations_router
 from trippilot.config import get_settings
-from trippilot.db.session import dispose_engine, get_engine
+from trippilot.db.session import dispose_engine
 from trippilot.graph.builder import build_graph
+from trippilot.tools import load_runtime_tools
 
 
 @asynccontextmanager
@@ -18,10 +18,12 @@ async def lifespan(app: FastAPI):
     if not settings.secret_key:
         raise RuntimeError("缺少 SECRET_KEY，无法签发 JWT")
 
+    tools = await load_runtime_tools(settings)
+
     try:
         async with AsyncPostgresSaver.from_conn_string(settings.postgres_uri) as saver:
             await saver.setup()
-            app.state.graph = build_graph(saver)
+            app.state.graph = build_graph(saver, tools=tools)
             yield
     finally:
         await dispose_engine()
