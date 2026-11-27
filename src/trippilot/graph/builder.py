@@ -57,6 +57,7 @@ def build_graph(
         api_key=secret_key,
         api_base=settings.deepseek_base_url,
         temperature=0.3,
+        extra_body={"thinking": {"type": "disabled"}},
     )
     fast_model = base_fast_model.bind_tools(active_tools) if active_tools else base_fast_model
 
