@@ -15,14 +15,19 @@ from langchain_core.tools import BaseTool
 
 from trippilot.config import Settings, get_settings
 from trippilot.tools.amap import load_curated_amap_tools
+from trippilot.tools.bundles import bundle_runtime_tools
 from trippilot.tools.deepseek_web import build_deepseek_web_tools
 from trippilot.tools.meituan_skill import build_meituan_skill_tools
 
 logger = logging.getLogger(__name__)
 
 
-async def load_runtime_tools(settings: Settings | None = None) -> list[BaseTool]:
-    """加载并聚合当前环境可用的全部 Agent 工具；远端 MCP 异常时优雅降级。"""
+async def load_runtime_tools(
+    settings: Settings | None = None,
+    *,
+    bundle: bool = True,
+) -> list[BaseTool]:
+    """加载并聚合当前环境可用的全部 Agent 工具；默认打包为 6 个高层复合工具以保护 KV Cache。"""
     cfg = settings or get_settings()
     tools: list[BaseTool] = list(build_deepseek_web_tools(cfg))
 
@@ -37,10 +42,15 @@ async def load_runtime_tools(settings: Settings | None = None) -> list[BaseTool]
         try:
             amap_tools = await load_curated_amap_tools(cfg)
             tools.extend(amap_tools)
-            logger.info("已挂载高德远程 MCP 工具 %d 个", len(amap_tools))
+            logger.info("已拉取高德远程 MCP 原始工具 %d 个", len(amap_tools))
         except Exception as exc:  # noqa: BLE001
             logger.warning("高德 MCP 工具拉取失败，降级为仅使用本地工具: %s", exc)
     else:
         logger.warning("未配置 AMAP_MAPS_API_KEY，跳过挂载高德 MCP 工具")
+
+    if bundle:
+        bundled = bundle_runtime_tools(tools)
+        logger.info("工具打包完成：由 %d 个原子工具收敛为 %d 个高层工具", len(tools), len(bundled))
+        return bundled
 
     return tools
