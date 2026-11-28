@@ -20,7 +20,6 @@ from trippilot.graph.evaluator import (
 from trippilot.graph.intent import (
     aclassify_intent,
     build_default_clarify_question,
-    inject_ephemeral_intent_hint,
 )
 from trippilot.graph.llm import (
     build_chat_only_model,
@@ -65,9 +64,13 @@ def build_graph(
     summarizer_model = build_summarizer_model(settings)
 
     async def intent_router(state: TripPilotState):
-        """前置两级意图与最小必填槽位门禁节点。"""
+        """前置两级意图与最小必填槽位门禁节点（自动继承合并跨轮次历史槽位）。"""
         healed = patch_dangling_tool_calls(state["messages"])
-        classification = await aclassify_intent(healed, summarizer_model)
+        classification = await aclassify_intent(
+            healed,
+            summarizer_model,
+            prior_info=state.get("intent_info"),
+        )
         return {
             "intent_info": classification.model_dump(),
             "eval_retry_count": 0,
@@ -106,26 +109,39 @@ def build_graph(
 
         intent_info = state.get("intent_info") or {}
         intent_type = intent_info.get("intent", "full_planning")
+        model_messages = list(compaction.model_messages)
 
-        # 3. 尾部瞬态引导（仅修改当次推理最后一条 HumanMessage 的内存副本，不破 KV Cache，不写库）
-        model_messages = inject_ephemeral_intent_hint(
-            compaction.model_messages,
-            intent_info,
-        )
-
-        # 4. 若由后置 Evaluator 触发了自愈重排，在末尾追加瞬态自愈修正指令
+        # 3. 若由后置 Evaluator 触发了自愈重排：
+        #    - 强制使用无工具绑定的 chat_only_model 输出修正说明段落，杜绝自愈中途再次发起 tool_calls；
+        #    - 复用上一条 AIMessage 的 id 将修正段落原地合并进该条 AIMessage，彻底避免在 Checkpoint 中留下连续两条 AIMessage！
         eval_feedback = str(state.get("eval_feedback") or "").strip()
         if eval_feedback:
             healing_prompt = build_self_healing_prompt(
                 eval_feedback,
                 state.get("eval_issues") or [],
             )
-            model_messages = [*model_messages, HumanMessage(content=healing_prompt)]
+            healing_messages = [*model_messages, HumanMessage(content=healing_prompt)]
+            patch_resp = await chat_only_model.ainvoke(healing_messages)
+            patch_text = str(getattr(patch_resp, "content", "") or "").strip()
+
+            prev_ai = next(
+                (m for m in reversed(healed_history) if isinstance(m, AIMessage) and not m.tool_calls),
+                None,
+            )
+            if prev_ai is not None and getattr(prev_ai, "id", None) and patch_text:
+                merged_content = f"{str(prev_ai.content or '').rstrip()}\n\n{patch_text}"
+                merged_msg = prev_ai.model_copy(update={"content": merged_content})
+                return {
+                    "messages": [*compaction.state_updates, merged_msg],
+                    "eval_feedback": "",
+                }
+            return {
+                "messages": [*compaction.state_updates, patch_resp],
+                "eval_feedback": "",
+            }
 
         if intent_type == "chitchat" or not active_tools:
-            chosen_model = chat_only_model if not active_tools and intent_type == "chitchat" else (
-                chat_only_model if intent_type == "chitchat" else fast_model
-            )
+            chosen_model = chat_only_model
         else:
             thinking = bool(config.get("configurable", {}).get("thinking", False))
             chosen_model = thinking_model if thinking else fast_model

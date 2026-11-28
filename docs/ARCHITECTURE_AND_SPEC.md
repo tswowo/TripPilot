@@ -54,16 +54,23 @@ flowchart TD
 ### 3.2 知识库层：PostgreSQL/pgvector 混合召回 + Agentic 目录精读（RAG）
 针对城市深度避坑指南、景区抢票规则（如“提前 7 天 18:00 放票、周一闭馆”）、馆内精华动线与地道美食清单：
 
-- **存储设计（`trippilot_guides` 表）**：
-  - `doc_id`（主键）、`city`、`category`（景区规则 / 美食避坑 / 动线指南）、`title`、`summary`、`content`、`source_id`、`metadata jsonb`；
-  - `embedding vector(1024)`：由百炼文本向量模型生成，支撑模糊语义匹配的向量路；
-  - PostgreSQL 扩展：`vector` 提供向量类型与 HNSW 索引，`pg_trgm` 提供中文景点名、店名、时间等字面关键词的相似度召回；
-  - 索引：`city/category` B-tree 过滤索引、`title/content` 的 `gin_trgm_ops` 索引、`embedding` 的 `vector_cosine_ops` HNSW 索引。
+- **存储设计（文档表 + Chunk 表）**：
+  - `trippilot_guides`：`doc_id`（主键）、`user_id`（上传归属，离线公共语料为 NULL）、`city`、`category`（景区规则 / 美食避坑 / 动线指南）、`title`、`summary`、`content`、`source_id`、`source_url`、`content_sha256`、`metadata jsonb`、原始文件名与向量化状态/进度，保存完整攻略与来源信息；
+  - `trippilot_guide_chunks`：`doc_id`、`chunk_no`、`heading_path`、`content`、`start_offset`、`end_offset`、`content_sha256`、`chunking_version`、`embedding vector(1024)`、`embedding_model`、`embedding_dimensions`，保存标题感知切分后的检索单元；
+  - Chunk 偏移量按字符计算，满足 `document.content[start_offset:end_offset] == chunk.content`，用于确定性溯源与按需精读；
+  - PostgreSQL 扩展：`vector` 提供向量类型与后续 HNSW 索引能力，`pg_trgm` 提供中文景点名、店名、时间等字面关键词的相似度召回；
+  - 当前索引：文档表 `city/category` B-tree 与 `user_id/create_time` B-tree；Chunk 内容 `gin_trgm_ops` 和 Chunk `embedding` 的 `vector_cosine_ops` HNSW 尚待在检索阶段按数据规模创建。
+- **文档上传与手动向量化**：
+  1. `POST /api/guides/upload` 接收 JWT 用户的 UTF-8 `.md` / `.txt`，校验扩展名与字节大小；Markdown 可带 JSON frontmatter，普通文本自动补齐标题、城市、分类、摘要与来源标识。上传时统一生成新的 `doc_id`，避免跨用户主键冲突；
+  2. 上传只做规范化、确定性切分和数据库落库，初始状态为 `pending`，绝不自动调用 Embedding；
+  3. `POST /api/guides/{doc_id}/vectorize` 手动触发。后台任务通过单条条件 UPDATE 原子领取 `pending` / `failed` 文档，领取后状态为 `processing`；`completed` / `processing` 不可重复触发；
+  4. Embedding 按批量调用百炼，向量与已完成 Chunk 数在同一短事务写入；全部成功为 `completed`，异常为 `failed` 并保存脱敏错误。失败重试只查询 `embedding IS NULL` 的 Chunk，不重复消费已写入向量；
+  5. `GET /api/guides` 与 `GET /api/guides/{doc_id}` 返回是否已向量化、完成数/总数、百分比和错误信息；`DELETE` 禁止删除 `processing` 文档。当前使用单进程 FastAPI BackgroundTasks，任务本身不跨重启持久化，多实例阶段再引入 PostgreSQL 任务表或消息队列。
 - **混合召回与精排链路**：
   1. **元数据过滤（Pre-filter）**：按目的地 `city = '南京'` 过滤，天然隔离无关城市噪音；
-  2. **第一路（关键词召回）**：`pg_trgm` 相似度或 `ILIKE` 召回 Top-20，保留对专有名词和放票时间的字面匹配能力；
-  3. **第二路（向量召回）**：pgvector 余弦距离 `<=>` 查询召回 Top-20，使用 HNSW 近似最近邻索引；
-  4. **融合与重排**：客户端按文档 ID 去重，使用 **RRF（$\sum \frac{1}{k + \text{rank}_i}, k=60$）** 融合两路名次，再送入百炼 **`gte-rerank` Cross-Encoder** 精排取 Top-5；
+  2. **第一路（关键词召回）**：`pg_trgm` 相似度或 `ILIKE` 召回 Chunk Top-20，保留对专有名词和放票时间的字面匹配能力；
+  3. **第二路（向量召回）**：pgvector 余弦距离 `<=>` 查询召回 Chunk Top-20，使用 HNSW 近似最近邻索引；
+  4. **融合与重排**：客户端按 Chunk ID 去重，使用 **RRF（$\sum \frac{1}{k + \text{rank}_i}, k=60$）** 融合两路名次，再送入百炼 **`gte-rerank` Cross-Encoder** 精排取 Top-5；
   5. **Agentic 按需精读**：同时向上下文注入该城市攻略文档的 `<guides_catalog>` 一句话目录，模型在需要完整游览动线时可主动调用 `read_guide_section(doc_id, offset, limit)` 精读原文，输出强制携带 `[source_id]`。
 
 ### 3.3 上下文工程与 PostgreSQL 分工

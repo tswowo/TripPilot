@@ -87,11 +87,11 @@ def deterministic_redline_check(
         # 极短回复（非完整路书）无需触发质检回退
         return EvaluationResult(score=90, passed=True)
 
-    # 检查预算是否超支
+    # 检查预算是否超支（兼容 Markdown 表格粗体单元格如 `| **合计** | **约 ¥7,240** |`）
     user_budget = _extract_number_yuan(budget_slot)
     if user_budget and user_budget > 0:
         total_matches = re.findall(
-            r"(?:合计|总计|总费用|总花费)[^\n\d]{0,15}(?:约\s*)?(?:¥|￥)?\s*(\d[\d,]{2,7})",
+            r"(?:合计|总计|总费用|总花费)[*|:\s约≈￥¥]{1,25}(\d[\d,]{2,7})",
             text,
         )
         for m in total_matches:

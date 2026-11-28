@@ -129,13 +129,45 @@ def test_deterministic_redline_check_catches_budget_overrun():
         "往返机票、住宿与餐饮安排如下...\n"
         "## 二、预算核算\n"
         "| 项目 | 金额 |\n"
-        "| 合计 | 约 ¥7,240 |\n"
+        "| **合计** | **约 ¥7,240** |\n"
     )
     res = deterministic_redline_check(itinerary, budget_slot="5000元")
     assert res is not None
     assert res.passed is False
     assert res.score < 80
     assert any("预算超支" in issue for issue in res.issues)
+
+
+@pytest.mark.asyncio
+async def test_aclassify_intent_merges_prior_slots_after_clarify():
+    """当上一轮为 clarify（已提取 destination='南京', date_or_days='3天'），
+    本轮用户回复 '改成从哈尔滨出发，顺便看下天气' 时：
+    1. 不会被 fast_rule_classify 误判为 quick_lookup 或 refinement；
+    2. 新提取的 origin='哈尔滨' 与历史 prior_slots 合并后满足 3 个硬槽位，自动进入 full_planning。
+    """
+    fake_llm = RunnableLambda(
+        lambda _msgs: AIMessage(
+            content='{"intent": "full_planning", "slots": {"origin": "哈尔滨"}}'
+        )
+    )
+    prior_info = {
+        "intent": "clarify",
+        "slots": {"destination": "南京", "date_or_days": "3天", "budget": "2万"},
+    }
+    res = await aclassify_intent(
+        [
+            HumanMessage(content="我想去南京玩3天，预算2万"),
+            AIMessage(content="请问您从哪个城市出发？"),
+            HumanMessage(content="改成从哈尔滨出发，顺便看下天气"),
+        ],
+        classifier_llm=fake_llm,
+        prior_info=prior_info,
+    )
+    assert res.intent == "full_planning"
+    assert res.slots.origin == "哈尔滨"
+    assert res.slots.destination == "南京"
+    assert res.slots.date_or_days == "3天"
+    assert res.slots.budget == "2万"
 
 
 @pytest.mark.asyncio

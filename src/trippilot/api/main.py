@@ -6,6 +6,8 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from trippilot.api.auth import router as auth_router
 from trippilot.api.chat import router as chat_router
 from trippilot.api.conversations import router as conversations_router
+from trippilot.api.guides import GuideUploadSizeLimitMiddleware
+from trippilot.api.guides import router as guides_router
 from trippilot.config import get_settings
 from trippilot.db.session import dispose_engine
 from trippilot.graph.builder import build_graph
@@ -30,6 +32,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(GuideUploadSizeLimitMiddleware)
 
 
 @app.get("/health")
@@ -39,4 +42,5 @@ def health() -> dict[str, str]:
 
 app.include_router(auth_router)
 app.include_router(conversations_router)
+app.include_router(guides_router)
 app.include_router(chat_router)

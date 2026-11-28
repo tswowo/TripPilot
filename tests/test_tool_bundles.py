@@ -290,3 +290,40 @@ async def test_plan_commute_route_resolves_chinese_names_and_plans_transit():
     assert len(transit_calls) == 1
     assert transit_calls[0]["origin"] == "118.862614,31.734753"
     assert transit_calls[0]["destination"] == "118.789165,32.020671"
+
+
+@pytest.mark.asyncio
+async def test_plan_commute_route_short_distance_auto_fallback_to_walking():
+    """当短距离 transit 返回空 transits: [] 时，应在同一轮自动降级调用步行路线规划。"""
+
+    @tool("maps_text_search")
+    async def maps_text_search(keywords: str, city: str = "", count: int = 10) -> str:
+        """模拟短途起点终点搜索。"""
+        return json.dumps(
+            {"pois": [{"id": "B1", "name": keywords, "location": "118.789,32.020"}]},
+            ensure_ascii=False,
+        )
+
+    @tool("maps_direction_transit_integrated")
+    async def maps_direction_transit_integrated(
+        origin: str, destination: str, city: str, cityd: str
+    ) -> str:
+        """模拟距离过近返回空公交列表。"""
+        return json.dumps({"distance": 650, "transits": []}, ensure_ascii=False)
+
+    @tool("maps_direction_walking")
+    async def maps_direction_walking(origin: str, destination: str) -> str:
+        """模拟步行规划。"""
+        return json.dumps({"paths": [{"distance": 650, "duration": 520}]}, ensure_ascii=False)
+
+    bundled = bundle_runtime_tools(
+        [maps_text_search, maps_direction_transit_integrated, maps_direction_walking]
+    )
+    route_tool = next(t for t in bundled if t.name == "plan_commute_route")
+    raw_out = await route_tool.ainvoke(
+        {"origin": "夫子庙", "destination": "老门东", "city": "南京", "mode": "transit"}
+    )
+    payload = json.loads(raw_out)
+    assert payload["auto_fallback_to_walking"] is True
+    assert payload["walking_route"]["paths"][0]["distance"] == 650
+

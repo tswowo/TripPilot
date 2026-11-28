@@ -279,7 +279,7 @@ def build_amap_macro_tools(atomic_tools: Sequence[BaseTool]) -> list[BaseTool]:
                     }
                     raw_search_data = parse_tool_output(await around_tool.ainvoke(around_args))
 
-            if not raw_search_data and "maps_text_search" in tool_map:
+            if not raw_search_data.get("pois") and "maps_text_search" in tool_map:
                 text_tool = tool_map["maps_text_search"]
                 combined_kw = (
                     f"{around_location.strip()} {keywords.strip()}".strip()
@@ -431,12 +431,30 @@ def build_amap_macro_tools(atomic_tools: Sequence[BaseTool]) -> list[BaseTool]:
                 }
 
             route_data = parse_tool_output(await route_tool.ainvoke(route_args))
-            output = {
+            output: dict[str, Any] = {
                 "mode": mode,
                 "resolved_origin": origin_info,
                 "resolved_destination": dest_info,
                 "route": route_data,
             }
+
+            # 当默认 mode='transit' 但起止点距离过近（<1km）导致高德返回空公交换乘列表时，自动同轮降级补充步行路线
+            if (
+                mode == "transit"
+                and isinstance(route_data.get("transits"), list)
+                and len(route_data["transits"]) == 0
+                and "maps_direction_walking" in tool_map
+            ):
+                try:
+                    walk_tool = tool_map["maps_direction_walking"]
+                    walk_data = parse_tool_output(
+                        await walk_tool.ainvoke({"origin": orig_coord, "destination": dest_coord})
+                    )
+                    output["auto_fallback_to_walking"] = True
+                    output["walking_route"] = walk_data
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("短途公交换乘自动降级步行规划失败: %s", exc)
+
             return json.dumps(output, ensure_ascii=False)
 
         macro_tools.append(plan_commute_route)

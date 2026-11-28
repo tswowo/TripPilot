@@ -148,6 +148,24 @@ class TravelSlots(BaseModel):
     budget: str = ""
     preferences: str = ""
 
+    def merge_with(self, prior: TravelSlots | dict[str, Any] | None) -> TravelSlots:
+        """与上一轮已提取的历史槽位合并（当前轮新提取的非空值优先，未提及的继承历史值）。"""
+        if prior is None:
+            return self
+        prior_obj = (
+            TravelSlots.model_validate(prior)
+            if isinstance(prior, dict)
+            else prior
+        )
+        return TravelSlots(
+            origin=self.origin.strip() or prior_obj.origin.strip(),
+            destination=self.destination.strip() or prior_obj.destination.strip(),
+            date_or_days=self.date_or_days.strip() or prior_obj.date_or_days.strip(),
+            travelers=self.travelers.strip() or prior_obj.travelers.strip(),
+            budget=self.budget.strip() or prior_obj.budget.strip(),
+            preferences=self.preferences.strip() or prior_obj.preferences.strip(),
+        )
+
     def format_summary(self) -> str:
         parts: list[str] = []
         if self.origin:
@@ -240,20 +258,30 @@ def enforce_minimal_slot_gate(result: IntentClassification) -> IntentClassificat
     return result
 
 
-def fast_rule_classify(messages: Sequence[BaseMessage]) -> IntentClassification | None:
+def fast_rule_classify(
+    messages: Sequence[BaseMessage],
+    *,
+    prior_intent: str = "",
+    prior_slots: TravelSlots | None = None,
+) -> IntentClassification | None:
     """Level 1：0ms 确定性规则快筛。命中时直接返回分类结果，免去 LLM 调用。"""
     human_msgs = [m for m in messages if isinstance(m, HumanMessage)]
     if not human_msgs:
         return None
 
+    inherited_slots = prior_slots.model_copy() if prior_slots is not None else TravelSlots()
     latest_text = str(human_msgs[-1].content or "").strip()
     norm = _normalize_text(latest_text)
     if not norm:
-        return IntentClassification(intent="chitchat")
+        return IntentClassification(intent="chitchat", slots=inherited_slots)
 
     # 1. 纯寒暄/问候/致谢/身份询问（0ms 直出）
     if norm in _CHITCHAT_EXACT:
-        return IntentClassification(intent="chitchat")
+        return IntentClassification(intent="chitchat", slots=inherited_slots)
+
+    # 若上一轮处于 clarify 待用户补充槽位状态，必须走 Level 2 槽位提取与合并，禁止被快筛误判为单点快查或微调
+    if prior_intent == "clarify":
+        return None
 
     has_prior_assistant = any(
         isinstance(m, AIMessage) and bool(str(m.content or "").strip()) and not m.tool_calls
@@ -271,13 +299,13 @@ def fast_rule_classify(messages: Sequence[BaseMessage]) -> IntentClassification 
             clarify_question=build_default_clarify_question(missing, slots),
         )
 
-    # 3. 已有历史方案时的明确局部微调指令
+    # 3. 已有历史方案时的明确局部微调指令（保留已继承的历史槽位）
     if (
         has_prior_assistant
         and len(latest_text) <= 45
         and any(kw in latest_text for kw in _REFINEMENT_KEYWORDS)
     ):
-        return IntentClassification(intent="refinement")
+        return IntentClassification(intent="refinement", slots=inherited_slots)
 
     # 4. 显式单点快查（如“南京明天天气怎么样”、“禄口机场到夫子庙坐地铁怎么走”）
     if (
@@ -285,7 +313,7 @@ def fast_rule_classify(messages: Sequence[BaseMessage]) -> IntentClassification 
         and any(kw in latest_text for kw in _SINGLE_LOOKUP_KEYWORDS)
         and not any(pkw in latest_text for pkw in _PLANNING_KEYWORDS)
     ):
-        return IntentClassification(intent="quick_lookup")
+        return IntentClassification(intent="quick_lookup", slots=inherited_slots)
 
     return None
 
@@ -306,8 +334,12 @@ def _build_dialogue_digest(messages: Sequence[BaseMessage], *, max_turns: int = 
     return "\n".join(recent)
 
 
-def _parse_classifier_json(raw_text: str) -> IntentClassification | None:
-    """从分类器 LLM 输出文本中稳健解析 JSON 并校验为 IntentClassification。"""
+def _parse_classifier_json(
+    raw_text: str,
+    *,
+    prior_slots: TravelSlots | None = None,
+) -> IntentClassification | None:
+    """从分类器 LLM 输出文本中稳健解析 JSON，合并历史槽位并执行最小必填槽位门禁校验。"""
     cleaned = (raw_text or "").strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
@@ -335,7 +367,8 @@ def _parse_classifier_json(raw_text: str) -> IntentClassification | None:
         travelers=str(raw_slots.get("travelers") or "").strip(),
         budget=str(raw_slots.get("budget") or "").strip(),
         preferences=str(raw_slots.get("preferences") or "").strip(),
-    )
+    ).merge_with(prior_slots)
+
     missing = [
         str(x).strip()
         for x in (data.get("missing_hard_slots") or [])
@@ -355,22 +388,39 @@ def _parse_classifier_json(raw_text: str) -> IntentClassification | None:
 async def aclassify_intent(
     messages: Sequence[BaseMessage],
     classifier_llm: Runnable | None = None,
+    *,
+    prior_info: dict[str, Any] | None = None,
 ) -> IntentClassification:
-    """执行两级混合意图与槽位识别（0ms 规则快筛 -> 轻量 LLM 结构化提取 -> 最小槽位门禁校准）。"""
-    fast_result = fast_rule_classify(messages)
+    """执行两级混合意图与槽位识别（0ms 规则快筛 -> 轻量 LLM 结构化提取 + 历史槽位继承 -> 最小槽位门禁校准）。"""
+    prior_intent = str((prior_info or {}).get("intent") or "").strip()
+    raw_prior_slots = (prior_info or {}).get("slots")
+    prior_slots = (
+        TravelSlots.model_validate(raw_prior_slots)
+        if isinstance(raw_prior_slots, dict)
+        else TravelSlots()
+    )
+
+    fast_result = fast_rule_classify(
+        messages,
+        prior_intent=prior_intent,
+        prior_slots=prior_slots,
+    )
     if fast_result is not None:
         return fast_result
 
     if classifier_llm is None:
-        return IntentClassification(intent="full_planning")
+        return IntentClassification(intent="full_planning", slots=prior_slots)
 
     digest = _build_dialogue_digest(messages)
     if not digest:
-        return IntentClassification(intent="chitchat")
+        return IntentClassification(intent="chitchat", slots=prior_slots)
+
+    prior_summary = prior_slots.format_summary()
+    prior_context = f"\n（历史已确认槽位：{prior_summary}）" if prior_summary else ""
 
     prompt_messages = [
         SystemMessage(content=_INTENT_CLASSIFIER_SYSTEM_PROMPT),
-        HumanMessage(content=f"请分析以下对话并输出 JSON：\n\n{digest}"),
+        HumanMessage(content=f"请分析以下对话并输出 JSON{prior_context}：\n\n{digest}"),
     ]
     try:
         response = await classifier_llm.ainvoke(
@@ -378,13 +428,13 @@ async def aclassify_intent(
             config={"tags": [INTERNAL_LLM_TAG]},
         )
         raw_content = str(getattr(response, "content", "") or "")
-        parsed = _parse_classifier_json(raw_content)
+        parsed = _parse_classifier_json(raw_content, prior_slots=prior_slots)
         if parsed is not None:
             return parsed
     except Exception as exc:  # noqa: BLE001
         logger.debug("轻量意图识别 LLM 调用异常，降级为 full_planning: %s", exc)
 
-    return IntentClassification(intent="full_planning")
+    return IntentClassification(intent="full_planning", slots=prior_slots)
 
 
 def build_ephemeral_tail_hint(classification: IntentClassification) -> str:

@@ -260,6 +260,7 @@ async def stream_graph_events(
     }
     step_seq = 0
     in_reasoning = False
+    need_healing_sep = False
     async for mode, data in graph.astream(
         {"messages": [HumanMessage(content=user_message)]},
         config,
@@ -279,7 +280,11 @@ async def stream_graph_events(
                     delta["reasoning_content"] = str(reasoning_content)
                     in_reasoning = True
                 if chunk.content:
-                    delta["content"] = str(chunk.content)
+                    piece = str(chunk.content)
+                    if need_healing_sep:
+                        piece = f"\n\n{piece.lstrip()}"
+                        need_healing_sep = False
+                    delta["content"] = piece
                     in_reasoning = False
                 if in_reasoning and not delta and getattr(chunk, "tool_call_chunks", None):
                     # 思考 Token 已结束，开始流式拼装工具调用 JSON，立即通知上下游停止思考秒表
@@ -298,6 +303,8 @@ async def stream_graph_events(
                         if isinstance(m, AIMessage) and m.content:
                             yield "delta", {"content": str(m.content)}
                 record = build_step_record(step_seq + 1, node_name, node_output)
+                if node_name == "evaluator" and "validation_errors" in record:
+                    need_healing_sep = True
                 # 过滤纯内部完成事件（仅保留工具调用、工具结果或携带 validation_errors 的质检告警）
                 if record.get("action") == "node_completed" and "validation_errors" not in record:
                     continue
