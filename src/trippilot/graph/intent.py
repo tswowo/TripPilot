@@ -318,20 +318,41 @@ def fast_rule_classify(
     return None
 
 
-def _build_dialogue_digest(messages: Sequence[BaseMessage], *, max_turns: int = 3) -> str:
-    """提取最近 N 轮的用户输入与助手最终回复摘要（剥离庞大 ToolMessage），用于轻量意图分类。"""
-    lines: list[str] = []
+def _build_dialogue_digest(
+    messages: Sequence[BaseMessage],
+    *,
+    max_user_turns: int = 15,
+    max_ai_turns: int = 3,
+) -> str:
+    """构建供意图与槽位识别器消费的全局对话摘要：
+    1. 若存在上下文压缩归档摘要（trippilot_context_summary），优先置于最前；
+    2. 保留会话中全部（或最近 15 轮）用户的 HumanMessage 原文（用户消息极短但包含早期关键约束与槽位）；
+    3. 仅保留最近 3 轮助手的最终 AIMessage 摘要（剥离庞大 ToolMessage 与早期长路书正文）。
+    """
+    summary_lines: list[str] = []
+    dialogue_items: list[tuple[str, str]] = []
+
     for msg in messages:
-        if isinstance(msg, HumanMessage):
+        if isinstance(msg, SystemMessage) and getattr(msg, "id", None) == "trippilot_context_summary":
             text = str(msg.content or "").strip()
             if text:
-                lines.append(f"用户: {text[:300]}")
+                summary_lines.append(f"【早期对话归档摘要】:\n{text[:600]}")
+        elif isinstance(msg, HumanMessage):
+            text = str(msg.content or "").strip()
+            if text:
+                dialogue_items.append(("user", f"用户: {text[:300]}"))
         elif isinstance(msg, AIMessage) and not msg.tool_calls:
             text = str(msg.content or "").strip()
             if text:
-                lines.append(f"助手: {text[:240]}")
-    recent = lines[-(max_turns * 2) :]
-    return "\n".join(recent)
+                dialogue_items.append(("ai", f"助手: {text[:200]}"))
+
+    # 统计需要保留的最近 max_ai_turns 条助手回复与最近 max_user_turns 条用户消息的索引
+    user_indices = [i for i, (role, _) in enumerate(dialogue_items) if role == "user"]
+    ai_indices = [i for i, (role, _) in enumerate(dialogue_items) if role == "ai"]
+    keep_indices = set(user_indices[-max_user_turns:]) | set(ai_indices[-max_ai_turns:])
+
+    kept_lines = [text for i, (_, text) in enumerate(dialogue_items) if i in keep_indices]
+    return "\n".join([*summary_lines, *kept_lines])
 
 
 def _parse_classifier_json(
