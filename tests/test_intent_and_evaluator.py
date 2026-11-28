@@ -172,27 +172,24 @@ async def test_aclassify_intent_merges_prior_slots_after_clarify():
 
 
 def test_build_dialogue_digest_retains_early_user_turns_and_compacted_summary():
-    """验证即使经过多轮对话，早期轮次的 HumanMessage 与压缩摘要也不会在槽位提取时丢失。"""
+    """验证不写死最近 N 轮截断：当前活跃窗口内的全部 HumanMessage / AIMessage 摘要与压缩归档均被保留。"""
     msgs = [
         SystemMessage(id="trippilot_context_summary", content="核心槽位：同行2人，不吃辣"),
         HumanMessage(content="第1轮：我从哈尔滨出发，预算19999元"),
-        AIMessage(content="第1轮助手长回复..." * 20),
+        AIMessage(content="第1轮助手长回复..." * 30),
         HumanMessage(content="第2轮：南京天气怎么样"),
-        AIMessage(content="第2轮助手长回复..." * 20),
+        AIMessage(content="第2轮助手长回复..."),
         HumanMessage(content="第3轮：夫子庙有什么好吃的"),
-        AIMessage(content="第3轮助手长回复..." * 20),
+        AIMessage(content="第3轮助手长回复..."),
         HumanMessage(content="第4轮：总统府周一开门吗"),
-        AIMessage(content="第4轮助手长回复..." * 20),
+        AIMessage(content="第4轮助手长回复..."),
         HumanMessage(content="第5轮：好，按前面说的帮我排个下周末去南京3天的完整行程"),
     ]
     digest = _build_dialogue_digest(msgs)
-    # 1. 归档摘要被保留
     assert "同行2人，不吃辣" in digest
-    # 2. 第 1 轮的用户消息（含哈尔滨、19999元）依然被保留，而第 1 轮冗长的助手回复已被丢弃
     assert "第1轮：我从哈尔滨出发，预算19999元" in digest
-    assert "第1轮助手长回复" not in digest
-    # 3. 最近 3 轮的助手回复被保留
-    assert "第4轮助手长回复" in digest
+    assert "第1轮助手长回复" in digest
+    assert "第5轮：好，按前面说的帮我排个下周末去南京3天的完整行程" in digest
 
 
 @pytest.mark.asyncio
