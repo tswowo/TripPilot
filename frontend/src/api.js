@@ -7,13 +7,16 @@ export const clearToken = () => localStorage.removeItem(TOKEN_KEY)
 export async function api(path, body, method) {
   const headers = {}
   const token = getToken()
+  const isFormData = body instanceof FormData
+  let requestBody
+  if (body !== undefined) requestBody = isFormData ? body : JSON.stringify(body)
   if (token) headers.Authorization = `Bearer ${token}`
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (body !== undefined && !isFormData) headers['Content-Type'] = 'application/json'
 
   const res = await fetch(`/api${path}`, {
     method: method ?? (body !== undefined ? 'POST' : 'GET'),
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: requestBody,
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {

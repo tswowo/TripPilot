@@ -5,6 +5,7 @@ import {
   CircleCheck,
   Compass,
   Delete,
+  Document,
   EditPen,
   Loading,
   Opportunity,
@@ -21,7 +22,7 @@ import { api, apiStream } from '../api'
 import MarkdownView from './MarkdownView.vue'
 
 const props = defineProps({ user: Object })
-const emit = defineEmits(['logout'])
+const emit = defineEmits(['logout', 'open-guides'])
 
 const activeConvKey = () => `trippilot_active_conv_${props.user.id}`
 
@@ -786,6 +787,9 @@ function fallbackText(m) {
       <el-button type="primary" plain :icon="Plus" class="new-conv-btn" @click="newConversation">
         新建旅行规划
       </el-button>
+      <el-button :icon="Document" class="new-conv-btn guide-entry" @click="emit('open-guides')">
+        攻略知识库
+      </el-button>
 
       <div ref="convListEl" class="conv-list" @scroll="onConvScroll">
         <el-empty
@@ -1103,10 +1107,23 @@ function fallbackText(m) {
 }
 
 .new-conv-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
+  height: 32px;
+  padding: 8px 12px;
   border-radius: 10px;
   font-weight: 500;
-  margin-bottom: 10px;
+  margin: 0 0 10px;
+}
+.guide-entry {
+  color: #475569;
+}
+.guide-entry:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
 }
 
 .conv-list {

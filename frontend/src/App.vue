@@ -4,9 +4,11 @@ import { onMounted, ref } from 'vue'
 import { api, clearToken, getToken } from './api'
 import AuthForm from './components/AuthForm.vue'
 import ChatView from './components/ChatView.vue'
+import GuideLibraryView from './components/GuideLibraryView.vue'
 
 const user = ref(null)
 const checking = ref(true)
+const guidesOpen = ref(false)
 
 onMounted(async () => {
   if (getToken()) {
@@ -29,7 +31,17 @@ function logout() {
   <main class="shell">
     <div v-if="checking" v-loading="true" class="boot-loading" element-loading-text="正在加载工作台…" />
     <AuthForm v-else-if="!user" @logged-in="user = $event" />
-    <ChatView v-else :user="user" @logout="logout" />
+    <template v-else>
+      <ChatView :user="user" @logout="logout" @open-guides="guidesOpen = true" />
+      <el-drawer
+        v-model="guidesOpen"
+        :with-header="false"
+        size="min(1080px, 95vw)"
+        class="guide-drawer"
+      >
+        <GuideLibraryView v-if="guidesOpen" @close="guidesOpen = false" @logout="logout" />
+      </el-drawer>
+    </template>
   </main>
 </template>
 
@@ -63,5 +75,13 @@ body {
 .boot-loading {
   height: 100%;
   border-radius: 16px;
+}
+.guide-drawer .el-drawer__body {
+  padding: 22px 24px;
+}
+@media (max-width: 600px) {
+  .guide-drawer .el-drawer__body {
+    padding: 18px 14px;
+  }
 }
 </style>
