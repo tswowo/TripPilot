@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +15,10 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     embedding_model: str = "text-embedding-v3"
-    embedding_dimensions: int = 1024
+    embedding_dimensions: int = Field(default=1024, ge=1024, le=1024)
+    embedding_batch_size: int = Field(default=32, ge=1, le=128)
+    embedding_max_retries: int = Field(default=3, ge=0, le=10)
+    guide_upload_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
     rerank_model: str = "gte-rerank"
 
     amap_maps_api_key: str = ""
