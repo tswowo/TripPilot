@@ -53,13 +53,26 @@ class PatchedChatDeepSeek(ChatDeepSeek):
 
 
 def build_summarizer_model(settings: Settings | None = None) -> Runnable:
-    """构建不绑定工具、关闭思考模式的轻量摘要模型，专用于上下文压缩与离线归纳。"""
+    """构建不绑定工具、关闭思考模式且禁用流式广播的轻量辅助模型（专用于意图识别、上下文压缩与后置质检打分）。"""
     cfg = settings or get_settings()
     return PatchedChatDeepSeek(
         model=cfg.deepseek_model,
         api_key=SecretStr(cfg.deepseek_api_key),
         api_base=cfg.deepseek_base_url,
-        temperature=0.2,
+        temperature=0.1,
+        disable_streaming=True,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+
+
+def build_chat_only_model(settings: Settings | None = None) -> Runnable:
+    """构建不挂载工具的纯对话流式模型（专用于 chitchat 闲聊快车道直出）。"""
+    cfg = settings or get_settings()
+    return PatchedChatDeepSeek(
+        model=cfg.deepseek_model,
+        api_key=SecretStr(cfg.deepseek_api_key),
+        api_base=cfg.deepseek_base_url,
+        temperature=0.3,
         extra_body={"thinking": {"type": "disabled"}},
     )
 

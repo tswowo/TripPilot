@@ -267,6 +267,12 @@ async def stream_graph_events(
     ):
         if mode == "messages":
             chunk, _metadata = data
+            meta = _metadata if isinstance(_metadata, dict) else {}
+            tags = meta.get("tags") or []
+            node_in_meta = meta.get("langgraph_node") or ""
+            # 严格过滤内部辅助 LLM（意图分类器、上下文摘要器、后置质检打分器）的 JSON Token，防止串台到用户聊天框
+            if "internal_llm" in tags or node_in_meta in ("intent_router", "evaluator"):
+                continue
             if isinstance(chunk, AIMessageChunk):
                 delta: dict[str, Any] = {}
                 if reasoning_content := chunk.additional_kwargs.get("reasoning_content"):
@@ -286,8 +292,13 @@ async def stream_graph_events(
                 if node_name.startswith("__"):
                     continue
                 in_reasoning = False
+                # clarify 节点为 0ms Python 直出追问（不经 LLM 流式回调），在此将其追问文本作为标准 delta 推给前端
+                if node_name == "clarify" and isinstance(node_output, dict):
+                    for m in node_output.get("messages") or []:
+                        if isinstance(m, AIMessage) and m.content:
+                            yield "delta", {"content": str(m.content)}
                 record = build_step_record(step_seq + 1, node_name, node_output)
-                # 过滤最后一轮 model 纯文本输出结束时的无意义 node_completed 节点事件
+                # 过滤纯内部完成事件（仅保留工具调用、工具结果或携带 validation_errors 的质检告警）
                 if record.get("action") == "node_completed" and "validation_errors" not in record:
                     continue
                 step_seq += 1
